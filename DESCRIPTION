@@ -1,0 +1,39 @@
+Package: cpdshrinkage
+Title: Significance-Guided Global-Local Shrinkage for Change Points, Collective Anomalies and Outliers
+Version: 0.1.0
+Authors@R: c(
+    person("Agniva", "Das", email = "agniva.das@example.com", role = c("aut", "cre")),
+    person("Muralidharan", "Kunnummal", role = "aut")
+  )
+Description: Implementation of significance-guided global-local shrinkage for distinguishing change points, collective anomalies and point outliers in autocorrelated time series.
+License: MIT
+Encoding: UTF-8
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.1
+Imports:
+    Matrix,
+    Rcpp,
+    RcppArmadillo,
+    spam,
+    dsp,
+    targets,
+    tarchetypes,
+    future,
+    furrr,
+    posterior,
+    coda,
+    nsp,
+    anomaly,
+    rvinecopulib,
+    copula,
+    DeCAFS,
+    changepoint,
+    stepR,
+    bcp,
+    EnvCpt,
+    ggplot2,
+    patchwork,
+    kableExtra
+Suggests:
+    testthat (>= 3.0.0),
+    cmdstanr

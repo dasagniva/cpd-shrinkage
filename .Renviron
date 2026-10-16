@@ -1,0 +1,3 @@
+LD_LIBRARY_PATH=/home/shiva/.local/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+PATH=/home/shiva/.local/bin:/home/shiva/.local/usr/bin:${PATH}
+PKG_CONFIG_PATH=/home/shiva/.local/usr/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}

@@ -1,0 +1,12 @@
+.Rhistory
+.RData
+.Rproj.user
+.Ruserdata
+*.Rcheck/
+
+# Targets cache
+_targets/
+
+# Temporary / intermediate outputs
+output/*
+!output/.gitkeep
