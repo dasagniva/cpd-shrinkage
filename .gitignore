@@ -7,6 +7,9 @@
 # Targets cache
 _targets/
 
+# Local libraries
+inst/libs/
+
 # Temporary / intermediate outputs
 output/*
 !output/.gitkeep
