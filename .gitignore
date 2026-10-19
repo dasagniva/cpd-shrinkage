@@ -7,9 +7,14 @@
 # Targets cache
 _targets/
 
-# Local libraries
+# Local libraries and toolchains
 inst/libs/
+.cmdstan/
 
 # Temporary / intermediate outputs
 output/*
 !output/.gitkeep
+
+# Stan compiled binaries
+stan/*
+!stan/*.stan
