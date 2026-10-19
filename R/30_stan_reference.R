@@ -153,6 +153,10 @@ fit_stan_reference <- function(
     s_out = o_t_mean
   )
 
+  mu_draws <- fit$draws("mu")
+  mu_mat <- as_draws_matrix(mu_draws)
+  mu_mean <- colMeans(mu_mat)
+
   new_cpd_fit(
     method      = "stan_ref",
     cp          = cp_locs,
@@ -167,7 +171,8 @@ fit_stan_reference <- function(
       max_rhat  = max(summ$rhat, na.rm = TRUE),
       min_ess   = min(summ$ess_bulk, na.rm = TRUE),
       phi_hat   = phi_hat,
-      sigma_hat = sigma_hat
+      sigma_hat = sigma_hat,
+      mu_mean   = mu_mean
     )
   )
 }

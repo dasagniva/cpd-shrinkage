@@ -1,4 +1,4 @@
 CMDSTAN=/home/shiva/Projects/ad_cpd_project/cpd-shrinkage/.cmdstan/cmdstan-2.40.0
-LD_LIBRARY_PATH=/home/shiva/.local/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+LD_LIBRARY_PATH=/home/shiva/Projects/ad_cpd_project/cpd-shrinkage/inst/libs/usr/lib/x86_64-linux-gnu:/home/shiva/.local/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
 PATH=/home/shiva/.local/bin:/home/shiva/.local/usr/bin:${PATH}
 PKG_CONFIG_PATH=/home/shiva/.local/usr/lib/x86_64-linux-gnu/pkgconfig:${PKG_CONFIG_PATH}

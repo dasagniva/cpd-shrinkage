@@ -88,7 +88,7 @@ transformed parameters {
       real lam_p = fmin(eta_psi[t] * lambda_psi[t], 1e4);
       real tau_lam_p = fmin(tau_psi * lam_p, 1e4);
       real eff_lam_p = sqrt(fmax(0.0, (c2 * square(lam_p)) / (c2 + square(tau_lam_p) + 1e-12)));
-      psi[t] = sigma * tau_psi * eff_lam_p * z_psi[t];
+      psi[t] = tau_psi * eff_lam_p * z_psi[t];
     }
   }
 }
