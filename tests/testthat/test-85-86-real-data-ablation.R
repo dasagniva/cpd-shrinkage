@@ -40,12 +40,13 @@ test_that("load_real_series accurately loads all four benchmark series", {
   expect_false(anyNA(ip$y))
   expect_equal(length(ip$dates), 312)
 
-  # 4. BTC: 2,191 points (2018-01-01 to 2023-12-31)
+  # 4. BTC: 2,190 daily log returns from 2,191 prices (2018-01-01 to 2023-12-31)
   btc <- load_real_series("btc", raw_dir = "../../data/raw")
   expect_equal(btc$name, "btc")
-  expect_equal(btc$n, 2191)
+  expect_equal(btc$n, 2190)
   expect_false(anyNA(btc$y))
-  expect_equal(btc$dates[1], "2018-01-01")
+  expect_lt(max(abs(btc$y)), 1) # returns, not log prices
+  expect_equal(btc$dates[1], "2018-01-02")
   expect_equal(btc$dates[length(btc$dates)], "2023-12-31")
 })
 
@@ -104,8 +105,8 @@ test_that("run_sensitivity_grid executes all parameter sweeps", {
   )
 
   expect_true(is.data.frame(sens_df))
-  # 12 parameter configurations
-  expect_equal(nrow(sens_df), 12)
+  # Default plus 20 one-at-a-time sweeps
+  expect_equal(nrow(sens_df), 21)
   expect_true(all(!is.na(sens_df$runtime_sec)))
   expect_true(all(!is.na(sens_df$macro_f1)))
 })

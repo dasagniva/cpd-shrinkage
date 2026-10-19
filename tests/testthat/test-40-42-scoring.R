@@ -183,14 +183,13 @@ test_that("classify_four_class labels collective anomalies correctly via return 
 
   expect_equal(nrow(res$collective), 1L)
   expect_equal(res$collective$start[1], 15L)
-  expect_equal(res$collective$end[1], 25L)
+  expect_equal(res$collective$end[1], 24L) # omega_25 is the return step; excursion is 15..24
   expect_equal(length(res$cp), 0L) # Neither 15 nor 25 should be sustained shift!
-  expect_equal(sum(res$class == "collective"), 11L) # 15..25
+  expect_equal(sum(res$class == "collective"), 10L) # 15..24
   expect_equal(as.character(res$class[15]), "collective")
-  expect_equal(as.character(res$class[20]), "collective")
-  expect_equal(as.character(res$class[25]), "collective")
+  expect_equal(as.character(res$class[24]), "collective")
+  expect_equal(as.character(res$class[25]), "nominal")
   expect_equal(as.character(res$class[14]), "nominal")
-  expect_equal(as.character(res$class[26]), "nominal")
 })
 
 test_that("classify_four_class uses CAPA overlap alternative when return condition fails", {
@@ -214,7 +213,7 @@ test_that("classify_four_class uses CAPA overlap alternative when return conditi
   res_capa <- classify_four_class(n, flagged_w, flagged_p, mu_hat, capa_collective = capa_df, L_max = 20, r = 0.3)
   expect_equal(nrow(res_capa$collective), 1L)
   expect_equal(res_capa$collective$start[1], 20L)
-  expect_equal(res_capa$collective$end[1], 35L)
+  expect_equal(res_capa$collective$end[1], 34L)
   expect_equal(length(res_capa$cp), 0L)
   expect_equal(as.character(res_capa$class[20]), "collective")
 })
@@ -232,10 +231,10 @@ test_that("classify_four_class enforces strict sequential precedence (first matc
 
   res <- classify_four_class(n, flagged_w, flagged_p, mu_hat, L_max = 12)
 
-  # 1. Collective: 10..19
+  # 1. Collective: 10..18 (omega_19 is the return step)
   expect_equal(nrow(res$collective), 1L)
   expect_equal(res$collective$start[1], 10L)
-  expect_equal(res$collective$end[1], 19L)
+  expect_equal(res$collective$end[1], 18L)
   expect_equal(as.character(res$class[14]), "collective") # Outlier 14 absorbed into collective
 
   # 2. Shift: 30
@@ -247,7 +246,7 @@ test_that("classify_four_class enforces strict sequential precedence (first matc
   expect_equal(as.character(res$class[5]), "point")
 
   # 4. Nominal: all other points
-  expect_equal(sum(res$class == "nominal"), 40 - 10 - 1 - 1)
+  expect_equal(sum(res$class == "nominal"), 40 - 9 - 1 - 1)
 })
 
 # ------------------------------------------------------------------------------
@@ -303,4 +302,45 @@ test_that("classify_and_build_fit builds fully valid cpd_fit object", {
   expect_equal(fit$point, 12L)
   expect_equal(length(fit$cp), 0L)
   expect_equal(as.character(fit$class[12]), "point")
+})
+
+test_that("windowed shift probabilities collapse each flagged run to one change", {
+  n <- 100
+  y <- c(rep(0, 50), rep(3, 50))
+  mu_hat <- y
+  p_win <- rep(0.0, n - 1)
+  p_win[46:54] <- 0.99 # run of flagged times around the change at t = 51
+  strength <- rep(0.01, n - 1)
+  strength[50] <- 3 # E|omega| peaks at omega_51 = mu_51 - mu_50
+  fit <- classify_and_build_fit(y, mu_hat, s_out = rep(0, n), p_omega = p_win, p_psi = rep(0, n),
+                                alpha_fdr = 0.05, cp_window = 5L, omega_strength = strength)
+  expect_equal(fit$cp, 51L)
+  expect_equal(sum(fit$class == "shift"), 1L)
+})
+
+test_that("flagged runs with short gaps collapse to a single change", {
+  n <- 100
+  y <- c(rep(0, 50), rep(3, 50))
+  p_win <- rep(0.0, n - 1)
+  p_win[c(46:49, 51:54)] <- 0.99 # one unflagged time inside the run
+  strength <- rep(0.01, n - 1)
+  strength[50] <- 3
+  fit <- classify_and_build_fit(y, y, s_out = rep(0, n), p_omega = p_win, p_psi = rep(0, n),
+                                alpha_fdr = 0.05, cp_window = 5L, omega_strength = strength)
+  expect_length(fit$cp, 1L)
+})
+
+test_that("nested or interleaved collective pairs give one merged segment", {
+  n <- 60
+  # Levels: 0 -> 2 at t = 10 -> 4 at t = 20 -> 2 at t = 30 -> 0 at t = 40.
+  # Rule 1 pairs (10, 40) and then (20, 30), whose segments 10-39 and 20-29 overlap.
+  mu_hat <- rep(0, n)
+  mu_hat[10:19] <- 2
+  mu_hat[20:29] <- 4
+  mu_hat[30:39] <- 2
+  res <- classify_four_class(n, c(10L, 20L, 30L, 40L), integer(0), mu_hat, L_max = 50, r = 0.3)
+  expect_equal(nrow(res$collective), 1L)
+  expect_equal(res$collective$start, 10L)
+  expect_equal(res$collective$end, 39L)
+  expect_equal(sum(res$class == "collective"), 30L)
 })

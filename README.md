@@ -1,8 +1,10 @@
 # Significance-Guided Global–Local Shrinkage for Autocorrelated Time Series
 
-[![R Test Suite](https://img.shields.io/badge/testthat-383%20passed-brightgreen.svg)]()
-[![Acceptance Gates](https://img.shields.io/badge/Acceptance%20Gates-P0--P10%20PASSED-success.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
+
+> **Status (October 2026): work in progress.** The sampler was corrected after an audit
+> (branch `fix/audit-2026-10`); acceptance gates P3-P10 must be re-run and several design
+> decisions are open (see Section 4). No results in `output/` should be cited.
 
 Official implementation and reproducibility suite for:
 > **Significance-Guided Global–Local Shrinkage for Distinguishing Change Points, Collective Anomalies and Point Outliers in Autocorrelated Time Series**  
@@ -53,7 +55,7 @@ cpd-shrinkage/
 │   ├── 41_bfdr.R               # Bayesian False Discovery Rate (BFDR) selection rule
 │   ├── 42_classify.R           # Sequential four-class classification and cpd_fit builder
 │   ├── 50_copula.R             # Copula Markov comparator (AIC family selection, bootstrap)
-│   ├── 60_baselines.R          # Wrappers for 11 benchmark methods under unified cpd_fit schema
+│   ├── 60_baselines.R          # Baseline wrappers under the unified cpd_fit schema (FPNN is a placeholder)
 │   ├── 70_metrics.R            # Change point F1, covering, Hausdorff, PR-AUC, macro-F1
 │   ├── 80_sim_design.R         # 17-cell simulation grid, pilot runner, MC SE reporting
 │   ├── 85_real_data.R          # Loaders and runners for 4 empirical series
@@ -65,7 +67,7 @@ cpd-shrinkage/
 │   ├── raw/                    # Well-log, Oilwell, US Industrial Production, Bitcoin
 │   └── processed/              # Formatted benchmarks
 ├── tests/
-│   ├── testthat/               # 11 unit test suites (383 assertions, 100% pass)
+│   ├── testthat/               # Unit tests, incl. exactness checks of each Gibbs update
 │   ├── gate_p3_verification.R  # Reference Stan vs Gibbs verification gate
 │   ├── gate_p4_verification.R  # Production Gibbs convergence and speed gate
 │   ├── gate_p5_verification.R  # BFDR error control and spike identifiability gate
@@ -82,30 +84,41 @@ cpd-shrinkage/
 
 ---
 
-## 4. Verification Gates and Audit Summary
+## 4. Verification Gates: Current Status
 
-Every phase in `CPD2_Code_Workflow.md` includes an automated acceptance gate that must pass before progression:
+Each phase in `CPD2_Code_Workflow.md` has an acceptance gate. Gate scripts save their
+results to `output/gate_pX_results.rds` and stop with an error if a criterion fails.
 
-| Phase | Milestone | Gate Verification Script | Verified Result | Gate Status |
-|---|---|---|---|---|
-| **P0** | Environment & Skeleton | `renv::status()` | Full package dependencies audited and frozen | **PASSED** |
-| **P1** | DGP & Simulator | `tests/testthat/test-10-dgp.R` | Piecewise $\mu$, AR(1), 4 outlier regimes validated | **PASSED** |
-| **P2** | Front-Ends & Prior Map | `tests/testthat/test-20-22-frontends.R` | NSP false-interval $\le \alpha_{\text{NSP}}$, CAPA prewhitened | **PASSED** |
-| **P3** | Reference Model in Stan | `tests/gate_p3_verification.R` | Posterior means agree within MC error ($\Delta \le 0.05$) | **PASSED** |
-| **P4** | Production Gibbs Sampler | `tests/gate_p4_verification.R` | Well-log ($n=4050$) in 4.12 min/chain, Geweke $p > 0.05$ | **PASSED** |
-| **P5** | Scoring & BFDR | `tests/gate_p5_verification.R` | Lone spikes: 100% labelled *point* (0 spurious shifts); FDR $\le 0.05$ | **PASSED** |
-| **P6** | Copula Comparator | `tests/gate_p6_verification.R` | AIC family recovery $\ge 93\%$, null false-flag rate $0.045 \approx 0.05$ | **PASSED** |
-| **P7** | Baseline Wrappers | `tests/gate_p7_verification.R` | All 12 baseline wrappers pass `validate_cpd_fit` | **PASSED** |
-| **P8** | Simulation Pilot | `tests/gate_p8_verification.R` | 680 fits across 17 cells $\times$ 5 reps; **0 NA fits**; budget 5.14h $< 10$h | **PASSED** |
-| **P9** | Empirical & Sensitivity | `tests/gate_p9_verification.R` | All 32 real-data fits valid; 6 ablations & 12 sweeps verified | **PASSED** |
-| **P10** | Outputs & Tables | `tests/gate_p10_verification.R` | Figures 1–3 and Tables 1–4 generated and verified | **PASSED** |
+| Phase | Gate script | Status |
+|---|---|---|
+| P0 | `renv::status()` | `robseg` now locked; `SBC` is still recorded from an unknown source |
+| P1 | `tests/testthat/test-10-dgp.R` | Unit tests pass |
+| P2 | `tests/gate_p2_verification.R` | Passed for the pipeline front-end `nsp_poly_ar` (false-interval rate <= 0.015 at phi = 0, 0.6, 0.9); the spec's `nsp_poly_selfnorm` fails (0.38, 1.00) - see SPEC_CHANGES.md C1 |
+| P3 | `tests/gate_p3_verification.R` | SBC now simulates from the fitted model; never run to completion before (no saved results); re-run needed |
+| P4 | `tests/gate_p4_verification.R` | Spec thresholds restored (R-hat < 1.01, ESS > 400, pipeline configuration). Global scales still mix slowly (see below). Getting-it-Right test not implemented |
+| P5 | `tests/gate_p5_verification.R` | Now requires power > 0.2 so that FDR = 0 cannot pass vacuously; re-run needed |
+| P6 | `tests/gate_p6_verification.R` | Passed (copula family recovery and null calibration) |
+| P7 | `tests/gate_p7_verification.R` | Re-run needed after baseline fixes (robseg, PELT/CAPA scaling, ch4) |
+| P8 | `tests/gate_p8_verification.R` | Only a 5-replicate pilot exists; full study not run |
+| P9 | `tests/gate_p9_verification.R` | Now checks that fitted levels track the data; re-run needed |
+| P10 | `tests/gate_p10_verification.R` | Checks files only; `tar_make()` does not yet run the simulation study |
+
+**Deviations from the specification** are recorded in [`SPEC_CHANGES.md`](SPEC_CHANGES.md)
+(NSP front-end, windowed shift probability, plug-in tau_omega, L_max = 50, minimum shift
+persistence, Bitcoin log returns). Each is swept back to its spec value in the sensitivity grid.
+
+**Known open issues**
+
+1. *Mixing* of the outlier global scale and rho in the dynamic outlier model.
+2. *FPNN* is a placeholder (`fpnn_placeholder`); the JISPS implementation is not yet ported.
+3. The Geweke (2004) joint-distribution test for P4 is not implemented.
 
 ---
 
 ## 5. Quickstart and Reproduction
 
 ### Running Unit Tests
-To run all 383 unit tests across all 11 test suites:
+To run all unit test files:
 ```bash
 Rscript -e 'testthat::test_dir("tests/testthat")'
 ```
@@ -116,7 +129,9 @@ To execute the master pipeline and generate all publication-grade figures and La
 Rscript run_pipeline.R
 ```
 
-This generates:
+This regenerates the figures and tables below from the saved gate results. They are
+**not** current: they were produced before the audit fixes and must be regenerated after
+the gates are re-run.
 - **`output/fig1_real_data_four_panel.png`**: Four-panel empirical application plot (Well-log, Oilwell, US INDPRO, Bitcoin) with shaded 90% posterior credible bands for $\mu$ and bottom strip for $o_t$.
 - **`output/fig2_sim_factor_effects.png`**: Multi-panel simulation performance comparison across sample size, autocorrelation, innovation distribution, jump size, and outlier regimes.
 - **`output/fig3_identifiability_quadrants.png`**: Scatter plot in $(p_t^\omega, p_t^\psi)$ exceedance space demonstrating complete decoupling of sustained shifts from isolated point outliers.

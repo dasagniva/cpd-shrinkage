@@ -239,6 +239,27 @@ init_rng_stream <- function(cell_id, rep_id, base_seed = 20261016L) {
   invisible(current_stream)
 }
 
+#' Robust location/scale standardisation
+#'
+#' Centres at the median and scales by a robust innovation-scale estimate,
+#' MAD(diff(y)) / sqrt(2), which is insensitive to level shifts and isolated
+#' outliers. Every model and baseline that assumes unit-scale noise is fitted
+#' on `z` and back-transformed with `center` and `scale`.
+#'
+#' @param y Numeric vector
+#'
+#' @return A list with `z` (standardised series), `center` and `scale`
+#' @export
+robust_standardize <- function(y) {
+  stopifnot(is.numeric(y), length(y) >= 3)
+  center <- stats::median(y)
+  scale <- stats::mad(diff(y)) / sqrt(2)
+  if (!is.finite(scale) || scale <= 1e-12) scale <- stats::mad(y)
+  if (!is.finite(scale) || scale <= 1e-12) scale <- stats::sd(y)
+  if (!is.finite(scale) || scale <= 1e-12) scale <- 1.0
+  list(z = (y - center) / scale, center = center, scale = scale)
+}
+
 #' Simple structured logging
 #'
 #' @param ... Message components passed to cat / paste

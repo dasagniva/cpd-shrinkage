@@ -33,9 +33,13 @@
 #' @param mu_hat Numeric vector of posterior mean level of length n.
 #' @param omega_hat Optional numeric vector of increment magnitudes. If NULL, computed as diff(mu_hat).
 #' @param capa_collective Optional data frame with columns `start` and `end` from CAPA.
-#' @param L_max Maximum length of a collective anomaly segment (default max(2L, floor(0.1 * n))).
+#' @param L_max Maximum length of a collective anomaly segment (default 50, the longest
+#'   collective anomaly in the simulation design; spec change C4 from 0.1 n).
 #' @param r Tolerance fraction for return to baseline (default 0.3).
 #' @param capa_overlap_min Minimum overlap fraction with CAPA collective segment (default 0.5).
+#' @param cp_window Half-width h used for windowed shift probabilities. Jump sizes and
+#'   return levels are then measured across the window: mu_hat[t + h] - mu_hat[t - h - 1].
+#'   With h = 0 this is exactly omega_hat_t = mu_hat_t - mu_hat_{t-1}.
 #'
 #' @return A list with elements:
 #'   \item{class}{Factor of length n with levels c("nominal", "shift", "collective", "point")}
@@ -52,12 +56,14 @@ classify_four_class <- function(
     capa_collective = NULL,
     L_max = NULL,
     r = 0.3,
-    capa_overlap_min = 0.5
+    capa_overlap_min = 0.5,
+    cp_window = 0L
 ) {
   stopifnot(is.numeric(n), n >= 2, length(mu_hat) == n)
+  h <- as.integer(cp_window)
 
   if (is.null(L_max)) {
-    L_max <- max(2L, as.integer(floor(0.1 * n)))
+    L_max <- 50L
   }
   stopifnot(is.numeric(L_max), L_max >= 2)
 
@@ -71,9 +77,10 @@ classify_four_class <- function(
 
   # Compute increment magnitudes if not provided
   if (is.null(omega_hat)) {
-    # omega_hat[t] corresponds to mu_hat[t] - mu_hat[t-1]
+    # omega_hat[t] corresponds to mu_hat[t + h] - mu_hat[t - h - 1] (h = 0: mu_hat[t] - mu_hat[t-1])
+    t_idx <- 2:n
     omega_hat_vec <- numeric(n)
-    omega_hat_vec[2:n] <- diff(mu_hat)
+    omega_hat_vec[t_idx] <- mu_hat[pmin(n, t_idx + h)] - mu_hat[pmax(1L, t_idx - h - 1L)]
   } else {
     stopifnot(length(omega_hat) %in% c(n - 1L, n))
     omega_hat_vec <- if (length(omega_hat) == n - 1L) c(0.0, omega_hat) else omega_hat
@@ -135,11 +142,11 @@ classify_four_class <- function(
 
           # Opposite signs requirement
           if (sign1 * sign2 < 0) {
-            # Baseline before jump: mu_{t1 - 1}
-            b_level <- mu_hat[max(1L, t1 - 1L)]
-            # Level after return: mu_{t2 + 1} (or mu_{t2} if t2 == n)
-            a_level1 <- mu_hat[min(n, t2 + 1L)]
-            a_level2 <- mu_hat[min(n, t2)]
+            # Baseline before jump: mu_{t1 - h - 1}
+            b_level <- mu_hat[max(1L, t1 - h - 1L)]
+            # Level after return: mu_{t2 + h} or mu_{t2 + h + 1}
+            a_level1 <- mu_hat[min(n, t2 + h + 1L)]
+            a_level2 <- mu_hat[min(n, t2 + h)]
 
             ret_diff <- min(abs(a_level1 - b_level), abs(a_level2 - b_level))
             tol <- r * abs(w1)
@@ -164,13 +171,13 @@ classify_four_class <- function(
         }
 
         if (!is.na(best_t2)) {
-          # Form collective anomaly segment [t1, best_t2]
+          # omega_{t2} = mu_{t2} - mu_{t2-1} is the return step, so the excursion
+          # occupies t1, ..., t2 - 1 (t2 - 1 >= t1 + 1 because t2 - t1 >= 2)
           collective_starts <- c(collective_starts, t1)
-          collective_ends   <- c(collective_ends, best_t2)
+          collective_ends   <- c(collective_ends, best_t2 - 1L)
           paired_omega      <- c(paired_omega, t1, best_t2)
 
-          # Label points t1..best_t2 as collective
-          class_vec[t1:best_t2] <- "collective"
+          class_vec[t1:(best_t2 - 1L)] <- "collective"
 
           # Remove paired points from available
           available_w <- setdiff(available_w, c(t1, best_t2))
@@ -183,13 +190,24 @@ classify_four_class <- function(
     }
   }
 
-  # Build collective data frame
+  # Build collective data frame; interleaved pairs can give overlapping segments,
+  # which are merged into one collective anomaly
   if (length(collective_starts) > 0) {
     collective_df <- data.frame(
       start = as.integer(collective_starts),
       end   = as.integer(collective_ends)
     )
     collective_df <- collective_df[order(collective_df$start), , drop = FALSE]
+    merged <- collective_df[1, , drop = FALSE]
+    for (k in seq_len(nrow(collective_df))[-1]) {
+      last <- nrow(merged)
+      if (collective_df$start[k] <= merged$end[last]) {
+        merged$end[last] <- max(merged$end[last], collective_df$end[k])
+      } else {
+        merged <- rbind(merged, collective_df[k, , drop = FALSE])
+      }
+    }
+    collective_df <- merged
     rownames(collective_df) <- NULL
   } else {
     collective_df <- data.frame(start = integer(0), end = integer(0))
@@ -258,6 +276,11 @@ classify_four_class <- function(
 #' @param diag Arbitrary diagnostic list.
 #' @param L_max Maximum length for collective anomalies.
 #' @param r Return tolerance fraction (default 0.3).
+#' @param cp_window Half-width h of windowed shift probabilities (0 = Eq. 9 per time point).
+#'   When h > 0, each run of BFDR-flagged times (gaps of at most h) is collapsed to the
+#'   single time with the largest `omega_strength`.
+#' @param omega_strength Optional length n - 1 vector (e.g. posterior mean |omega_t|)
+#'   used to pick one change location per flagged run.
 #'
 #' @return A validated `cpd_fit` object.
 #' @export
@@ -273,7 +296,9 @@ classify_and_build_fit <- function(
     runtime_sec = 0.0,
     diag = list(),
     L_max = NULL,
-    r = 0.3
+    r = 0.3,
+    cp_window = 0L,
+    omega_strength = NULL
 ) {
   n <- length(y)
   stopifnot(n >= 2, length(mu_hat) == n, length(s_out) == n, length(p_psi) == n)
@@ -292,6 +317,16 @@ classify_and_build_fit <- function(
     stop("p_omega must have length n - 1 or n")
   }
 
+  # Windowed probabilities flag a run of ~2h+1 times around each change: keep one
+  # representative per run. Flagged times at most h apart belong to the same run,
+  # since a window of half-width h cannot separate changes that close.
+  if (cp_window > 0 && length(flagged_omega) > 1) {
+    strength <- if (!is.null(omega_strength)) c(0.0, omega_strength) else s_cp
+    runs <- split(flagged_omega, cumsum(c(1L, diff(flagged_omega) > cp_window)))
+    flagged_omega <- vapply(runs, function(rn) rn[which.max(strength[rn])], integer(1))
+    names(flagged_omega) <- NULL
+  }
+
   bfdr_psi <- bayesian_fdr(p_psi, alpha = alpha_fdr)
   flagged_psi <- bfdr_psi$flagged
 
@@ -303,7 +338,8 @@ classify_and_build_fit <- function(
     mu_hat           = mu_hat,
     capa_collective  = capa_collective,
     L_max            = L_max,
-    r                = r
+    r                = r,
+    cp_window        = cp_window
   )
 
   scores_df <- data.frame(

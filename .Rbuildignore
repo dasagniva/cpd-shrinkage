@@ -1,2 +1,9 @@
 ^renv$
 ^renv\.lock$
+^inst/libs$
+^\.cmdstan$
+^\.Renviron$
+^output$
+^_targets$
+^run_pipeline\.R$
+^_targets\.R$

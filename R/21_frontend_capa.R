@@ -43,6 +43,23 @@ estimate_phi_robust <- function(y, max_phi = 0.95) {
   pmax(-max_phi, pmin(max_phi, phi_est))
 }
 
+#' Robust estimate of the marginal noise SD under AR(1) noise
+#'
+#' For AR(1) noise, Var(diff(eps)) = 2 sigma_marg^2 (1 - phi), so
+#' sigma_marg = MAD(diff(y)) / sqrt(2 (1 - phi_hat)), with phi_hat from
+#' estimate_phi_robust(). This is the scale that methods assuming independent noise
+#' (PELT, robust FPOP, CAPA without prewhitening) should be given.
+#'
+#' @param y Numeric vector
+#' @return Positive scalar
+#' @export
+robust_marginal_scale <- function(y) {
+  phi_hat <- min(0.95, max(0, estimate_phi_robust(y)))
+  s <- stats::mad(diff(y)) / sqrt(2 * (1 - phi_hat))
+  if (!is.finite(s) || s <= 1e-12) s <- robust_standardize(y)$scale
+  s
+}
+
 #' Run CAPA with optional prewhitening
 #'
 #' @param y Numeric vector of time series observations
@@ -84,10 +101,9 @@ run_frontend_capa <- function(
     if (scale_factor <= 1e-8) scale_factor <- 1.0
     y_tilde <- y_tilde / scale_factor
   } else {
+    # Shift-robust marginal noise scale; MAD(y - median) would be inflated by level shifts
     phi_hat <- 0.0
-    scale_factor <- stats::mad(y - med_y)
-    if (scale_factor <= 1e-8) scale_factor <- 1.0
-    y_tilde <- (y - med_y) / scale_factor
+    y_tilde <- (y - med_y) / robust_marginal_scale(y)
   }
 
   res <- anomaly::capa(

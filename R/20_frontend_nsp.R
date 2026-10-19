@@ -6,13 +6,15 @@
 
 #' Run Narrowest Significance Pursuit (NSP) to find significance intervals
 #'
-#' Implements Section 3.2 and Phase P2. Supports both self-normalised NSP
-#' (`nsp_poly_selfnorm` with `deg = 0`) as specified in Section 2, and the
-#' autoregressive extension (`nsp_poly_ar` with `ord = 1, deg = 0`).
+#' Implements Section 3.2 and Phase P2. The default is the autoregressive NSP
+#' (`nsp_poly_ar` with `ord = 1, deg = 0`). Spec change (SPEC_CHANGES.md, C1): the
+#' self-normalised NSP named in Section 2 failed the P2 null calibration under
+#' AR(1) noise (false-interval rate 0.38 at phi = 0.6, 1.00 at phi = 0.9, versus
+#' <= 0.015 for nsp_poly_ar), so it is kept only as an option.
 #'
 #' @param y Numeric vector of observed time series
 #' @param alpha Significance level alpha_NSP (default 0.1; sensitivity in {0.05, 0.10})
-#' @param method Character: "selfnorm" (default, per Section 2) or "ar" (for AR noise)
+#' @param method Character: "ar" (default) or "selfnorm"
 #' @param prewhiten Logical; if TRUE and method == "selfnorm", prewhitens y using estimated phi
 #' @param M Number of random intervals to draw (default 1000)
 #' @param min_size Minimum interval size (default 20)
@@ -28,7 +30,7 @@
 run_frontend_nsp <- function(
     y,
     alpha = 0.1,
-    method = c("selfnorm", "ar"),
+    method = c("ar", "selfnorm"),
     prewhiten = FALSE,
     M = 1000,
     min_size = 20,

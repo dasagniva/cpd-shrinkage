@@ -40,7 +40,9 @@ if (file.exists("R/00_utils.R")) {
 #' 4. indep_outliers: Independent outlier scales (rho = 0, dynamic = FALSE)
 #' 5. no_ar1: No AR(1) autoregressive noise (fix phi = 0)
 #' 6. standard_hs: Standard Horseshoe instead of Horseshoe+ (eta = 1)
-#' 7. marginal_var: Marginal variance instead of innovation variance in o_t (Eq. 8)
+#' 7. marginal_var: Marginal variance instead of innovation variance in o_t (Eq. 8).
+#'    o_t only enters the threshold-free point metric (PR-AUC), not the labels (which use
+#'    p^psi_t), so this ablation is read off the `pt_prauc` column.
 #'
 #' @param y Numeric vector of observations (simulated or real series)
 #' @param truth Optional ground truth list from `simulate_series`
@@ -144,6 +146,7 @@ run_ablation_study <- function(
       row_data$cp_f1       <- ev$cp$f1
       row_data$cp_covering <- ev$cp$covering
       row_data$pt_f1       <- ev$point$f1
+      row_data$pt_prauc    <- ev$point$pr_auc
       row_data$macro_f1    <- ev$four_class$macro_f1
     }
 
@@ -168,108 +171,75 @@ run_ablation_study <- function(
 
 #' Run Sensitivity Analysis Grid Across Hyperparameters
 #'
-#' Evaluates sensitivity across:
-#' - alpha (BFDR): {0.05, 0.10}
-#' - alpha_nsp: {0.05, 0.10}
-#' - kappa_in: {1.0, 2.0, 5.0}
-#' - delta: {0.0, 1.0, 2.0}
-#' - s_tau: default (1/sqrt(n)) vs p0-based
-#' - d_omega, d_psi: {1.0, 1.5, 2.0}
-#' - L_max: {10, 20, 30}
+#' One-at-a-time sweeps around the default configuration (SPEC_CHANGES.md). Every
+#' setting changed from the spec is also swept back to its spec value:
+#' - alpha (BFDR): 0.05 (default), 0.10
+#' - alpha_nsp: 0.05 (default), 0.10
+#' - kappa_in: 2 (default), 1, 5
+#' - delta: 1 (default), 0, 2
+#' - tau_omega: plug-in with p0 = 0.02 (default), p0 = 0.01, 0.05, sampled with s_tau = 1/sqrt(n) (spec)
+#' - d_omega: 1.0 (default), 0.75, 1.5 (spec); d_psi: 1.5 (default = spec), 1.0, 2.0
+#' - L_max: 50 (default), 30, 100, 0.1 n (spec)
+#' - cp_window h: 5 (default), 0 (spec Eq. 9), 10
+#' - min_shift_len m: 4 (default), 1 (spec: no persistence split), 8
 #'
 #' @param y Numeric vector of observations
 #' @param truth Optional ground truth list
-#' @param n_iter Gibbs iterations
-#' @param burn_in Gibbs burn-in
+#' @param n_iter,burn_in Gibbs iterations and burn-in
+#' @param n_chains Number of chains per configuration (default 2)
 #' @param seed Master random seed
 #'
-#' @return A tidy data frame with sensitivity metrics
+#' @return A tidy data frame with one row per configuration
 #' @export
 run_sensitivity_grid <- function(
     y,
     truth = NULL,
     n_iter = 1500,
     burn_in = 500,
+    n_chains = 2,
     seed = 42
 ) {
   n <- length(y)
   stopifnot(n >= 20, is.numeric(y))
 
-  # Define parameter sweep variations relative to baseline:
-  # Baseline: alpha = 0.05, alpha_nsp = 0.05, kappa_in = 2.0, delta = 1.0,
-  #           s_tau = "default", d = 1.5, L_max = 20
-  base_params <- list(
-    param_sweep = "baseline",
-    val         = "baseline",
-    alpha       = 0.05,
-    alpha_nsp   = 0.05,
-    kappa_in    = 2.0,
-    delta       = 1.0,
-    s_tau_type  = "default",
-    d_omega     = 1.5,
-    d_psi       = 1.5,
-    L_max       = 20L
+  base <- list(param = "default", val = "default", alpha = 0.05, alpha_nsp = 0.05, kappa_in = 2.0,
+               delta = 1.0, tau_mode = "plugin", p0 = 0.02, d_omega = 1.0, d_psi = 1.5,
+               L_max = 50L, cp_window = 5L, min_shift_len = 4L)
+  sw <- function(param, val, ...) modifyList(base, c(list(param = param, val = val), list(...)))
+  sweeps <- list(
+    base,
+    sw("alpha", "0.10", alpha = 0.10),
+    sw("alpha_nsp", "0.10", alpha_nsp = 0.10),
+    sw("kappa_in", "1", kappa_in = 1.0),
+    sw("kappa_in", "5", kappa_in = 5.0),
+    sw("delta", "0", delta = 0.0),
+    sw("delta", "2", delta = 2.0),
+    sw("tau_omega", "plug-in p0=0.01", p0 = 0.01),
+    sw("tau_omega", "plug-in p0=0.05", p0 = 0.05),
+    sw("tau_omega", "sampled (spec)", tau_mode = "sample"),
+    sw("d_omega", "0.75", d_omega = 0.75),
+    sw("d_omega", "1.5 (spec)", d_omega = 1.5),
+    sw("d_psi", "1.0", d_psi = 1.0),
+    sw("d_psi", "2.0", d_psi = 2.0),
+    sw("L_max", "30", L_max = 30L),
+    sw("L_max", "100", L_max = 100L),
+    sw("L_max", "0.1n (spec)", L_max = max(2L, as.integer(floor(0.1 * n)))),
+    sw("cp_window", "0 (spec)", cp_window = 0L),
+    sw("cp_window", "10", cp_window = 10L),
+    sw("min_shift_len", "1 (spec)", min_shift_len = 1L),
+    sw("min_shift_len", "8", min_shift_len = 8L)
   )
 
-  sweeps <- list()
-  sweeps[[1]] <- base_params
+  cat(sprintf("\n     SENSITIVITY ANALYSIS GRID: %d configurations\n\n", length(sweeps)))
 
-  # 1. Sweep alpha: 0.10
-  sweeps[[2]] <- modifyList(base_params, list(param_sweep = "alpha", val = "0.10", alpha = 0.10))
+  nsp_by_alpha <- list("0.05" = run_frontend_nsp(y, alpha = 0.05), "0.1" = run_frontend_nsp(y, alpha = 0.10))
+  capa_res <- run_frontend_capa(y, prewhiten = TRUE)
 
-  # 2. Sweep alpha_nsp: 0.10
-  sweeps[[3]] <- modifyList(base_params, list(param_sweep = "alpha_nsp", val = "0.10", alpha_nsp = 0.10))
-
-  # 3. Sweep kappa_in: 1.0, 5.0
-  sweeps[[4]] <- modifyList(base_params, list(param_sweep = "kappa_in", val = "1.0", kappa_in = 1.0))
-  sweeps[[5]] <- modifyList(base_params, list(param_sweep = "kappa_in", val = "5.0", kappa_in = 5.0))
-
-  # 4. Sweep delta: 0.0, 2.0
-  sweeps[[6]] <- modifyList(base_params, list(param_sweep = "delta", val = "0.0", delta = 0.0))
-  sweeps[[7]] <- modifyList(base_params, list(param_sweep = "delta", val = "2.0", delta = 2.0))
-
-  # 5. Sweep s_tau: p0-based (p0 = 0.02)
-  sweeps[[8]] <- modifyList(base_params, list(param_sweep = "s_tau", val = "p0_based", s_tau_type = "p0"))
-
-  # 6. Sweep d_omega / d_psi: 1.0, 2.0
-  sweeps[[9]]  <- modifyList(base_params, list(param_sweep = "d_tail", val = "1.0", d_omega = 1.0, d_psi = 1.0))
-  sweeps[[10]] <- modifyList(base_params, list(param_sweep = "d_tail", val = "2.0", d_omega = 2.0, d_psi = 2.0))
-
-  # 7. Sweep L_max: 10, 30
-  sweeps[[11]] <- modifyList(base_params, list(param_sweep = "L_max", val = "10", L_max = 10L))
-  sweeps[[12]] <- modifyList(base_params, list(param_sweep = "L_max", val = "30", L_max = 30L))
-
-  cat("\n====================================================================\n")
-  cat("     SENSITIVITY ANALYSIS GRID (Section 5, Phase P9)\n")
-  cat(sprintf("     Running %d parameter configurations\n", length(sweeps)))
-  cat("====================================================================\n\n")
-
-  # Precompute front-ends where possible
-  intervals_005 <- run_frontend_nsp(y, alpha = 0.05)
-  intervals_010 <- run_frontend_nsp(y, alpha = 0.10)
-  capa_res      <- run_frontend_capa(y, prewhiten = TRUE)
-
-  results_list <- list()
-
+  results_list <- vector("list", length(sweeps))
   for (s_idx in seq_along(sweeps)) {
     cfg <- sweeps[[s_idx]]
-    cat(sprintf("[%2d/%d] Sweep %-12s (val: %-8s)... ",
-                s_idx, length(sweeps), cfg$param_sweep, cfg$val))
-
-    t0 <- proc.time()[3]
-
-    # Select NSP intervals based on alpha_nsp
-    ints <- if (cfg$alpha_nsp == 0.10) intervals_010 else intervals_005
-    pmap <- build_prior_maps(n = n, nsp_intervals = ints$intervals,
-                             capa_results = capa_res, kappa_in = cfg$kappa_in)
-
-    # s_tau calculation
-    s_tau_val <- if (cfg$s_tau_type == "p0") {
-      p0 <- 0.02
-      (p0 / (1.0 - p0)) * (1.0 / sqrt(n))
-    } else {
-      1.0 / sqrt(n)
-    }
+    ints <- nsp_by_alpha[[as.character(cfg$alpha_nsp)]]
+    pmap <- build_prior_maps(n = n, nsp_intervals = ints$intervals, capa_results = capa_res, kappa_in = cfg$kappa_in)
 
     fit <- gibbs_sampler(
       y               = y,
@@ -277,54 +247,38 @@ run_sensitivity_grid <- function(
       a_vec           = pmap$a,
       n_iter          = n_iter,
       burn_in         = burn_in,
-      thin            = 1,
-      n_chains        = 1,
+      n_chains        = n_chains,
       dynamic         = TRUE,
       delta           = cfg$delta,
       alpha_fdr       = cfg$alpha,
       capa_collective = capa_res$collective,
       L_max           = cfg$L_max,
-      s_tau           = s_tau_val,
+      tau_omega_mode  = cfg$tau_mode,
+      p0              = cfg$p0,
       d_omega         = cfg$d_omega,
       d_psi           = cfg$d_psi,
+      cp_window       = cfg$cp_window,
+      min_shift_len   = cfg$min_shift_len,
       seed            = seed + s_idx * 50L
     )
 
-    t_elapsed <- as.numeric(proc.time()[3] - t0)
-
-    n_cp <- length(fit$cp)
-    n_pt <- length(fit$point)
-    n_co <- if (is.data.frame(fit$collective)) nrow(fit$collective) else 0L
-
-    res_row <- list(
-      sweep_id    = s_idx,
-      param       = cfg$param_sweep,
-      val         = cfg$val,
-      n_cp        = n_cp,
-      n_point     = n_pt,
-      n_coll      = n_co,
-      runtime_sec = fit$runtime_sec
-    )
-
+    res_row <- list(sweep_id = s_idx, param = cfg$param, val = cfg$val,
+                    n_cp = length(fit$cp), n_point = length(fit$point), n_coll = nrow(fit$collective),
+                    runtime_sec = fit$runtime_sec, max_rhat = fit$diag$max_rhat)
     if (!is.null(truth)) {
       ev <- evaluate_all_metrics(fit, truth)
       res_row$cp_f1    <- ev$cp$f1
       res_row$pt_f1    <- ev$point$f1
+      res_row$pt_prauc <- ev$point$pr_auc
+      res_row$coll_f1  <- ev$collective$f1
       res_row$macro_f1 <- ev$four_class$macro_f1
     }
-
     results_list[[s_idx]] <- as.data.frame(res_row, stringsAsFactors = FALSE)
-    cat(sprintf("done (%.2fs) | CPs: %d, Pts: %d, Coll: %d\n",
-                t_elapsed, n_cp, n_pt, n_co))
+    cat(sprintf("[%2d/%d] %-14s %-16s | CPs %d, Pts %d, Coll %d\n", s_idx, length(sweeps), cfg$param, cfg$val,
+                res_row$n_cp, res_row$n_point, res_row$n_coll))
   }
 
   summary_grid <- do.call(rbind, results_list)
   rownames(summary_grid) <- NULL
-
-  cat("\n====================================================================\n")
-  cat("     SENSITIVITY ANALYSIS COMPLETE\n")
-  cat("====================================================================\n\n")
-  print(summary_grid)
-
   summary_grid
 }

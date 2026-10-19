@@ -4817,6 +4817,24 @@
       "Repository": "CRAN",
       "Encoding": "UTF-8"
     },
+    "robseg": {
+      "Package": "robseg",
+      "Version": "2019.07.02",
+      "Source": "GitHub",
+      "Type": "Package",
+      "Title": "Segmentation using functionnal pruning for robust losses",
+      "Author": "Guillem Rigaill",
+      "Maintainer": "Guillem Rigaill <rigaill@evry.inra.fr>",
+      "Description": "A wrapper to a C implementation of robseg",
+      "License": "LGPL (>= 2.1)",
+      "LazyData": "TRUE",
+      "RemoteType": "github",
+      "RemoteHost": "api.github.com",
+      "RemoteUsername": "guillemr",
+      "RemoteRepo": "robust-fpop",
+      "RemoteRef": "master",
+      "RemoteSha": "ce49c26aa5b5eee84a835e69cbb7ca572f669792"
+    },
     "robustbase": {
       "Package": "robustbase",
       "Version": "0.99-7",

@@ -82,3 +82,34 @@ test_that("gibbs_sampler runs with dynamic outliers enabled", {
   expect_silent(validate_cpd_fit(fit, n = n))
   expect_equal(nrow(fit$scores), n)
 })
+
+test_that("persistence_split moves short excursions of mu to psi and keeps shifts", {
+  mu <- c(rep(0, 20), rep(3, 20))
+  mu[8:9] <- 5      # 2-point excursion: shorter than m = 4
+  mu[30] <- -2      # 1-point excursion inside the second level
+  psi <- rep(0, 40)
+  sp <- persistence_split(mu, psi, m = 4)
+  expect_equal(sp$mu, c(rep(0, 20), rep(3, 20)))
+  expect_equal(sp$mu + sp$psi, mu + psi)
+  expect_equal(sp$psi[8:9], c(5, 5))
+  expect_equal(sp$psi[30], -5)
+  # Excursions lasting m points or more stay in the level
+  mu2 <- c(rep(0, 20), rep(4, 4), rep(0, 16))
+  expect_equal(persistence_split(mu2, rep(0, 40), m = 4)$mu, mu2)
+  expect_equal(persistence_split(mu, psi, m = 1)$mu, mu)
+})
+
+test_that("persistence_split is applied to mu + psi jointly", {
+  n <- 60
+  # A spike held in mu and a 12-point block held in psi
+  mu <- rep(0, n)
+  mu[10] <- 6
+  psi <- rep(0, n)
+  psi[30:41] <- 3
+  sp <- persistence_split(mu, psi, m = 4)
+  expect_equal(sp$mu + sp$psi, mu + psi)
+  expect_equal(sp$mu[10], 0)       # spike moved to the outlier process
+  expect_equal(sp$psi[10], 6)
+  expect_equal(sp$mu[30:41], rep(3, 12)) # persistent block moved to the level
+  expect_equal(sp$psi[30:41], rep(0, 12))
+})
