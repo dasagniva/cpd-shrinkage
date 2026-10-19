@@ -413,6 +413,11 @@ evaluate_four_class <- function(truth_class, est_class) {
 #' @return A comprehensive named list of evaluation metrics
 #' @export
 evaluate_all_metrics <- function(truth, fit) {
+  if (inherits(truth, "cpd_fit") && is.list(fit)) {
+    tmp <- truth
+    truth <- fit
+    fit <- tmp
+  }
   stopifnot(is.list(truth), inherits(fit, "cpd_fit"))
   n <- length(truth$class)
 

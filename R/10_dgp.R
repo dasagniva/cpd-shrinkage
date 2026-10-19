@@ -123,10 +123,12 @@ simulate_series <- function(
     attempts <- 0
     while (length(coll_starts) < collective && attempts < 200) {
       attempts <- attempts + 1
-      L <- sample(min_coll_len:max_coll_len, 1)
-      candidate_start <- sample(10:(n - L - 10), 1)
+      L <- sample(min(min_coll_len, max(2L, floor(n / 10L))):min(max_coll_len, max(3L, floor(n / 4L))), 1)
+      max_start <- n - L - 3L
+      if (max_start < 3L) next
+      candidate_start <- sample(3L:max_start, 1)
       candidate_end <- candidate_start + L - 1L
-      candidate_range <- (candidate_start - 2L):(candidate_end + 2L)
+      candidate_range <- max(1L, candidate_start - 2L):min(n, candidate_end + 2L)
 
       if (!any(occupied[candidate_range])) {
         coll_starts <- c(coll_starts, candidate_start)

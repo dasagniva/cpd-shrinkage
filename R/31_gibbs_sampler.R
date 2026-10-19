@@ -50,7 +50,12 @@ run_gibbs_chain <- function(
     dynamic = FALSE,
     delta = 0.0,
     s_tau = NULL,
-    seed = NULL
+    seed = NULL,
+    fix_phi = NULL,
+    horseshoe_plus = TRUE,
+    innovation_var = TRUE,
+    d_omega = 1.5,
+    d_psi = 1.5
 ) {
   if (!is.null(seed)) {
     set.seed(as.integer(seed) + as.integer(chain_id))
@@ -149,8 +154,12 @@ run_gibbs_chain <- function(
 
     # Step 2: Update phi
     e_curr <- y - mu_curr - psi_curr
-    phi_res <- update_phi(e = e_curr, phi_curr = phi_curr, sigma = sigma_curr)
-    phi_curr <- phi_res$phi
+    if (!is.null(fix_phi)) {
+      phi_curr <- as.numeric(fix_phi)
+    } else {
+      phi_res <- update_phi(e = e_curr, phi_curr = phi_curr, sigma = sigma_curr)
+      phi_curr <- phi_res$phi
+    }
 
     # Step 3: Compute prewhitened innovations u
     u_curr <- numeric(n)
@@ -168,29 +177,56 @@ run_gibbs_chain <- function(
     sigma_marg_curr <- sigma_curr / sqrt(1.0 - phi_curr^2)
 
     # Step 5: Update Horseshoe+ scales on increments omega
-    hs_res <- update_hsplus_scales(
-      omega         = omega_curr,
-      sigma         = sigma_curr,
-      tau_omega     = tau_omega_curr,
-      lambda_omega  = lambda_omega_curr,
-      eta_omega     = eta_omega_curr,
-      kappa         = kappa_w,
-      aux_lambda    = aux_lambda_w,
-      aux_eta       = aux_eta_w,
-      aux_tau       = aux_tau_w,
-      s_tau         = s_tau,
-      c2_tilde      = c2_tilde
-    )
-    tau_omega_curr    <- hs_res$tau_omega
-    lambda_omega_curr <- hs_res$lambda_omega
-    eta_omega_curr    <- hs_res$eta_omega
-    v_omega           <- hs_res$v_omega
-    v_omega_tilde     <- hs_res$v_omega_tilde
-    aux_lambda_w      <- hs_res$aux_lambda
-    aux_eta_w         <- hs_res$aux_eta
-    aux_tau_w         <- hs_res$aux_tau
-    c2_tilde          <- hs_res$c2_tilde
-    c2                <- hs_res$c2
+    if (isTRUE(horseshoe_plus)) {
+      hs_res <- update_hsplus_scales(
+        omega         = omega_curr,
+        sigma         = sigma_curr,
+        tau_omega     = tau_omega_curr,
+        lambda_omega  = lambda_omega_curr,
+        eta_omega     = eta_omega_curr,
+        kappa         = kappa_w,
+        aux_lambda    = aux_lambda_w,
+        aux_eta       = aux_eta_w,
+        aux_tau       = aux_tau_w,
+        s_tau         = s_tau,
+        c2_tilde      = c2_tilde
+      )
+      tau_omega_curr    <- hs_res$tau_omega
+      lambda_omega_curr <- hs_res$lambda_omega
+      eta_omega_curr    <- hs_res$eta_omega
+      v_omega           <- hs_res$v_omega
+      v_omega_tilde     <- hs_res$v_omega_tilde
+      aux_lambda_w      <- hs_res$aux_lambda
+      aux_eta_w         <- hs_res$aux_eta
+      aux_tau_w         <- hs_res$aux_tau
+      c2_tilde          <- hs_res$c2_tilde
+      c2                <- hs_res$c2
+    } else {
+      # Standard Horseshoe: eta_omega = 1 identically
+      hs_res <- update_hsplus_scales(
+        omega         = omega_curr,
+        sigma         = sigma_curr,
+        tau_omega     = tau_omega_curr,
+        lambda_omega  = lambda_omega_curr,
+        eta_omega     = rep(1.0, n_omega),
+        kappa         = kappa_w,
+        aux_lambda    = aux_lambda_w,
+        aux_eta       = rep(1.0, n_omega),
+        aux_tau       = aux_tau_w,
+        s_tau         = s_tau,
+        c2_tilde      = c2_tilde
+      )
+      tau_omega_curr    <- hs_res$tau_omega
+      lambda_omega_curr <- hs_res$lambda_omega
+      eta_omega_curr    <- rep(1.0, n_omega)
+      v_omega           <- hs_res$v_omega
+      v_omega_tilde     <- hs_res$v_omega_tilde
+      aux_lambda_w      <- hs_res$aux_lambda
+      aux_eta_w         <- rep(1.0, n_omega)
+      aux_tau_w         <- hs_res$aux_tau
+      c2_tilde          <- hs_res$c2_tilde
+      c2                <- hs_res$c2
+    }
 
     # Step 6: Update outlier scales (independent or dynamic)
     out_res <- update_outlier_scales(
@@ -243,14 +279,16 @@ run_gibbs_chain <- function(
       mu2_sum <- mu2_sum + mu_curr^2
       psi_sum <- psi_sum + psi_curr
 
-      # Outlier score o_t (Eq. 8): uses innovation variance sigma^2
-      o_t_curr <- nu2_curr / (nu2_curr + sigma2_curr)
-      o_t_sum  <- o_t_sum + o_t_curr
+      # Outlier score o_t (Eq. 8): uses innovation variance or marginal variance
+      denom_var <- if (isTRUE(innovation_var)) sigma2_curr else sigma_marg_curr^2
+      o_t_curr  <- nu2_curr / (nu2_curr + denom_var)
+      o_t_sum   <- o_t_sum + o_t_curr
 
-      # Indicator counts for p_omega and p_psi (Eq. 9): d = 1.5 * sigma_marg
-      d_thresh <- 1.5 * sigma_marg_curr
-      p_omega_count <- p_omega_count + as.numeric(abs(omega_curr) > d_thresh)
-      p_psi_count   <- p_psi_count + as.numeric(abs(psi_curr) > d_thresh)
+      # Indicator counts for p_omega and p_psi (Eq. 9): d = d_omega/d_psi * sigma_marg
+      d_w_thresh <- as.numeric(d_omega) * sigma_marg_curr
+      d_p_thresh <- as.numeric(d_psi) * sigma_marg_curr
+      p_omega_count <- p_omega_count + as.numeric(abs(omega_curr) > d_w_thresh)
+      p_psi_count   <- p_psi_count + as.numeric(abs(psi_curr) > d_p_thresh)
     }
   }
 
@@ -303,9 +341,15 @@ gibbs_sampler <- function(
     delta = 0.0,
     alpha_fdr = 0.05,
     capa_collective = NULL,
-    L_max = NULL,
-    r = 0.3,
-    seed = NULL
+    L_max          = NULL,
+    r              = 0.3,
+    seed           = NULL,
+    s_tau          = NULL,
+    fix_phi        = NULL,
+    horseshoe_plus = TRUE,
+    innovation_var = TRUE,
+    d_omega        = 1.5,
+    d_psi          = 1.5
 ) {
   start_time <- proc.time()[3]
   n <- length(y)
@@ -319,30 +363,42 @@ gibbs_sampler <- function(
   chain_args <- seq_len(n_chains)
   chains_res <- if (n_chains == 1) {
     list(run_gibbs_chain(
-      chain_id = 1,
-      y        = y,
-      kappa    = kappa,
-      a_vec    = a_vec,
-      n_iter   = n_iter,
-      burn_in  = burn_in,
-      thin     = thin,
-      dynamic  = dynamic,
-      delta    = delta,
-      seed     = seed
+      chain_id       = 1,
+      y              = y,
+      kappa          = kappa,
+      a_vec          = a_vec,
+      n_iter         = n_iter,
+      burn_in        = burn_in,
+      thin           = thin,
+      dynamic        = dynamic,
+      delta          = delta,
+      s_tau          = s_tau,
+      seed           = seed,
+      fix_phi        = fix_phi,
+      horseshoe_plus = horseshoe_plus,
+      innovation_var = innovation_var,
+      d_omega        = d_omega,
+      d_psi          = d_psi
     ))
   } else {
     future.apply::future_lapply(chain_args, function(cid) {
       run_gibbs_chain(
-        chain_id = cid,
-        y        = y,
-        kappa    = kappa,
-        a_vec    = a_vec,
-        n_iter   = n_iter,
-        burn_in  = burn_in,
-        thin     = thin,
-        dynamic  = dynamic,
-        delta    = delta,
-        seed     = seed
+        chain_id       = cid,
+        y              = y,
+        kappa          = kappa,
+        a_vec          = a_vec,
+        n_iter         = n_iter,
+        burn_in        = burn_in,
+        thin           = thin,
+        dynamic        = dynamic,
+        delta          = delta,
+        s_tau          = s_tau,
+        seed           = seed,
+        fix_phi        = fix_phi,
+        horseshoe_plus = horseshoe_plus,
+        innovation_var = innovation_var,
+        d_omega        = d_omega,
+        d_psi          = d_psi
       )
     }, future.seed = TRUE)
   }
