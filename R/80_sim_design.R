@@ -128,21 +128,22 @@ run_method_on_replicate <- function(sim, method, m_args = list()) {
     if (method == "proposed") {
       # Proposed method: prior map + production Gibbs sampler
       # 1. Front-ends
-      intervals <- run_frontend_nsp(y, deg = 0, alpha = 0.05)
+      intervals <- run_frontend_nsp(y, alpha = 0.05)
       capa_res  <- run_frontend_capa(y, prewhiten = TRUE)
-      prior_maps <- build_prior_maps(y, intervals = intervals, capa_result = capa_res, kappa_in = 2.0, delta = 1.0)
+      prior_maps <- build_prior_maps(n = n, nsp_intervals = intervals$intervals, capa_results = capa_res, kappa_in = 2.0)
 
-      n_iter  <- if (!is.null(m_args$n_iter)) m_args$n_iter else 2500
-      burn_in <- if (!is.null(m_args$burn_in)) m_args$burn_in else 1000
+      n_iter   <- if (!is.null(m_args$n_iter)) m_args$n_iter else 2500
+      burn_in  <- if (!is.null(m_args$burn_in)) m_args$burn_in else 1000
+      n_chains <- if (!is.null(m_args$n_chains)) m_args$n_chains else 2
 
       gibbs_sampler(
         y               = y,
         kappa           = prior_maps$kappa,
-        a_vec           = prior_maps$a_vec,
+        a_vec           = prior_maps$a,
         n_iter          = n_iter,
         burn_in         = burn_in,
         thin            = 1,
-        n_chains        = 2,
+        n_chains        = n_chains,
         dynamic         = TRUE,
         delta           = 1.0,
         capa_collective = capa_res$collective,
@@ -190,7 +191,8 @@ run_pilot_simulation <- function(
     grid = NULL,
     n_reps = 5,
     methods = c("proposed", "copula", "decafs", "pelt", "robseg", "capa"),
-    seed_base = 8000
+    seed_base = 8000,
+    m_args_list = list()
 ) {
   if (is.null(grid)) grid <- create_simulation_grid()
 
@@ -222,7 +224,8 @@ run_pilot_simulation <- function(
 
       for (m in methods) {
         t0 <- proc.time()[3]
-        eval_res <- run_method_on_replicate(sim, m)
+        m_args <- if (!is.null(m_args_list[[m]])) m_args_list[[m]] else list()
+        eval_res <- run_method_on_replicate(sim, m, m_args = m_args)
         t_elapsed <- as.numeric(proc.time()[3] - t0)
 
         results_rows[[row_idx]] <- data.frame(
