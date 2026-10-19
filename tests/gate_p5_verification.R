@@ -16,11 +16,21 @@ cat("====================================================================\n\n")
 
 source("R/00_utils.R")
 source("R/10_dgp.R")
+source("R/20_frontend_nsp.R")
+source("R/21_frontend_capa.R")
+source("R/22_prior_map.R")
 source("R/32_gibbs_updates.R")
 source("R/40_scoring.R")
 source("R/41_bfdr.R")
 source("R/42_classify.R")
 source("R/31_gibbs_sampler.R")
+source("R/70_metrics.R")
+
+suppressPackageStartupMessages(library(future))
+plan(multicore, workers = 4)
+
+# Pipeline configuration of the proposed method (identical to 80_sim_design / 85_real_data)
+P5_ARGS <- list(n_iter = 3000, burn_in = 1000, n_chains = 4, alpha_fdr = 0.05)
 
 dir.create("output", showWarnings = FALSE, recursive = TRUE)
 
@@ -35,6 +45,8 @@ n_pilot <- 80
 
 fdp_shifts <- numeric(B_pilot)
 fdp_points <- numeric(B_pilot)
+rec_shifts <- numeric(B_pilot)
+rec_points <- numeric(B_pilot)
 
 cat(sprintf("Running %d pilot simulations (n = %d, alpha = %.2f)...\n", B_pilot, n_pilot, alpha_target))
 
@@ -60,17 +72,7 @@ for (b in seq_len(B_pilot)) {
   true_cp <- sim$truth$cp
   true_pt <- sim$truth$point
 
-  # Fit Gibbs sampler
-  fit <- gibbs_sampler(
-    y          = sim$y,
-    n_iter     = 2500,
-    burn_in    = 1000,
-    thin       = 1,
-    n_chains   = 2,
-    dynamic    = FALSE,
-    alpha_fdr  = alpha_target,
-    seed       = 2000 + b
-  )
+  fit <- do.call(fit_proposed, c(list(y = sim$y, seed = 2000 + b), P5_ARGS))
 
   flagged_cp <- fit$cp
   flagged_pt <- fit$point
@@ -88,6 +90,9 @@ for (b in seq_len(B_pilot)) {
     }
     fdp_shifts[b] <- n_false_cp / length(flagged_cp)
   }
+
+  rec_shifts[b] <- if (length(true_cp) > 0) mean(sapply(true_cp, function(tc) any(abs(flagged_cp - tc) <= 2))) else NA
+  rec_points[b] <- if (length(true_pt) > 0) mean(true_pt %in% flagged_pt) else NA
 
   # Evaluate FDP for points
   if (length(flagged_pt) == 0) {
@@ -109,15 +114,16 @@ se_fdr_points   <- sd(fdp_points) / sqrt(B_pilot)
 
 cat(sprintf("\nResults across %d simulations:\n", B_pilot))
 cat(sprintf("  Target Alpha        : %.3f\n", alpha_target))
-cat(sprintf("  Shift Realised FDR  : %.4f (MC SE = %.4f)\n", mean_fdr_shifts, se_fdr_shifts))
-cat(sprintf("  Point Realised FDR  : %.4f (MC SE = %.4f)\n", mean_fdr_points, se_fdr_points))
+cat(sprintf("  Shift Realised FDR  : %.4f (MC SE = %.4f) | power %.3f\n", mean_fdr_shifts, se_fdr_shifts, mean(rec_shifts, na.rm = TRUE)))
+cat(sprintf("  Point Realised FDR  : %.4f (MC SE = %.4f) | power %.3f\n", mean_fdr_points, se_fdr_points, mean(rec_points, na.rm = TRUE)))
 
 # Check calibration: realised FDR <= alpha + 2 * SE
 tol_shifts <- alpha_target + 2.0 * se_fdr_shifts
 tol_points <- alpha_target + 2.0 * se_fdr_points
 
-pass_fdr_shifts <- mean_fdr_shifts <= tol_shifts
-pass_fdr_points <- mean_fdr_points <= tol_points
+# A realised FDR of 0 is only meaningful if the method flags something: require power > 0.2
+pass_fdr_shifts <- mean_fdr_shifts <= tol_shifts && mean(rec_shifts, na.rm = TRUE) > 0.2
+pass_fdr_points <- mean_fdr_points <= tol_points && mean(rec_points, na.rm = TRUE) > 0.2
 
 cat(sprintf("  Shift FDR Pass: %s (%.4f <= %.4f)\n", pass_fdr_shifts, mean_fdr_shifts, tol_shifts))
 cat(sprintf("  Point FDR Pass: %s (%.4f <= %.4f)\n\n", pass_fdr_points, mean_fdr_points, tol_points))
@@ -150,16 +156,7 @@ for (k in seq_len(B_spike)) {
   y_spike <- eps
   y_spike[spike_loc] <- y_spike[spike_loc] + 6.0 * sigma_marg
 
-  fit_spike <- gibbs_sampler(
-    y          = y_spike,
-    n_iter     = 2500,
-    burn_in    = 1000,
-    thin       = 1,
-    n_chains   = 2,
-    dynamic    = FALSE,
-    alpha_fdr  = 0.05,
-    seed       = 5000 + k
-  )
+  fit_spike <- do.call(fit_proposed, c(list(y = y_spike, seed = 5000 + k), P5_ARGS))
 
   # Check:
   # 1. Outlier at spike_loc is identified as point anomaly
@@ -196,6 +193,9 @@ results <- list(
   fdr_shift_se              = se_fdr_shifts,
   fdr_point_mean            = mean_fdr_points,
   fdr_point_se              = se_fdr_points,
+  power_shift               = mean(rec_shifts, na.rm = TRUE),
+  power_point               = mean(rec_points, na.rm = TRUE),
+  config                    = P5_ARGS,
   alpha_target              = alpha_target,
   identifiability_rate      = identifiability_pass_rate,
   n_spike_replicates        = B_spike,

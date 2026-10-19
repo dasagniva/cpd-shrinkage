@@ -11,6 +11,16 @@ if (requireNamespace("targets", quietly = TRUE)) {
   # Source all R functions
   lapply(list.files("R", pattern = "\\.R$", full.names = TRUE), source)
 
+  # MCMC chains run in parallel forked workers
+  future::plan(future::multicore, workers = 4)
+
+  # Shared configuration (identical to tests/gate_p9_verification.R)
+  PROPOSED_ARGS <- list(n_iter = 10000, burn_in = 5000, n_chains = 4, alpha_fdr = 0.05, seed = 909)
+  ablation_series <- function() {
+    simulate_series(n = 300, phi = 0.5, noise = "gaussian", jump = 2.0,
+                    outlier_regime = "mixed", p_outlier = 0.03, collective = 2, seed = 910)
+  }
+
   tar_option_set(
     packages = c(
       "spam", "rvinecopulib", "anomaly", "nsp",
@@ -35,24 +45,21 @@ if (requireNamespace("targets", quietly = TRUE)) {
       run_real_data_benchmark(
         series_names = c("welllog", "oilwell", "indpro", "btc"),
         methods      = c("proposed", "copula", "decafs", "pelt", "robseg", "capa", "fpnn", "ch4"),
+        m_args_list  = list(proposed = PROPOSED_ARGS, copula = list(B_boot = 30)),
         raw_dir      = "data/raw"
       )
     }),
 
     # 4. Component Ablation Study
     tar_target(ablation_results, {
-      set.seed(42)
-      sim <- simulate_series(n = 500, phi = 0.5, noise = "gaussian", jump = 2.0,
-                             outlier_regime = "mixed", p_outlier = 0.03, collective = 2, seed = 42)
-      run_ablation_study(sim$y, truth = sim$truth, n_iter = 2000, burn_in = 800)
+      sim <- ablation_series()
+      run_ablation_study(sim$y, truth = sim$truth, n_iter = 4000, burn_in = 1500, n_chains = 4, seed = 910)
     }),
 
     # 5. Sensitivity Analysis Grid
     tar_target(sensitivity_results, {
-      set.seed(42)
-      sim <- simulate_series(n = 500, phi = 0.5, noise = "gaussian", jump = 2.0,
-                             outlier_regime = "mixed", p_outlier = 0.03, collective = 2, seed = 42)
-      run_sensitivity_grid(sim$y, truth = sim$truth, n_iter = 1500, burn_in = 500)
+      sim <- ablation_series()
+      run_sensitivity_grid(sim$y, truth = sim$truth, n_iter = 4000, burn_in = 1500, seed = 920)
     }),
 
     # 6. Tables (LaTeX)

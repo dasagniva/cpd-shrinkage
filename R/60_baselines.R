@@ -183,7 +183,9 @@ baseline_nsp <- function(y, alpha = 0.05, ...) {
 # ------------------------------------------------------------------------------
 #' CAPA Baseline Wrapper
 #' @param y Numeric vector of time series observations
-#' @param prewhiten Logical: prewhiten before CAPA (default FALSE for raw CAPA alone baseline)
+#' @param prewhiten Logical: prewhiten before CAPA (default FALSE for raw CAPA alone baseline).
+#'   Either way the series is robustly centred and scaled, as `anomaly::capa` assumes
+#'   standardised data.
 #' @param ... Additional arguments passed to `anomaly::capa`
 #' @return A validated `cpd_fit` object
 #' @export
@@ -192,23 +194,10 @@ baseline_capa <- function(y, prewhiten = FALSE, ...) {
   n <- length(y)
   stopifnot(is.numeric(y), n >= 10)
 
-  if (isTRUE(prewhiten)) {
-    res <- run_frontend_capa(y, prewhiten = TRUE, ...)
-    point_locs <- res$point
-    coll_df <- res$collective
-    diag_list <- list(phi_hat = res$phi_hat, raw = res$raw)
-  } else {
-    raw_fit <- anomaly::capa(y, ...)
-    pts <- anomaly::point_anomalies(raw_fit)
-    colls <- anomaly::collective_anomalies(raw_fit)
-    point_locs <- if (is.null(pts) || nrow(pts) == 0) integer(0) else sort(as.integer(pts$location))
-    coll_df <- if (is.null(colls) || nrow(colls) == 0) {
-      data.frame(start = integer(0), end = integer(0))
-    } else {
-      data.frame(start = as.integer(colls$start), end = as.integer(colls$end))
-    }
-    diag_list <- list(raw = raw_fit)
-  }
+  res <- run_frontend_capa(y, prewhiten = isTRUE(prewhiten), ...)
+  point_locs <- res$point
+  coll_df <- res$collective
+  diag_list <- list(phi_hat = res$phi_hat, raw = res$raw)
   runtime_sec <- as.numeric(proc.time()[3] - start_time)
 
   class_vec <- rep("nominal", n)
@@ -239,6 +228,10 @@ baseline_capa <- function(y, prewhiten = FALSE, ...) {
 # 5. PELT
 # ------------------------------------------------------------------------------
 #' PELT Baseline Wrapper
+#'
+#' `cpt.mean` with the Normal cost assumes independent noise with unit variance, so the
+#' series is scaled by its robust marginal noise SD (robust_marginal_scale) first.
+#'
 #' @param y Numeric vector of time series observations
 #' @param penalty Penalty type (default "MBIC")
 #' @param ... Additional arguments passed to `changepoint::cpt.mean`
@@ -249,7 +242,7 @@ baseline_pelt <- function(y, penalty = "MBIC", ...) {
   n <- length(y)
   stopifnot(is.numeric(y), n >= 5)
 
-  fit <- changepoint::cpt.mean(y, method = "PELT", penalty = penalty, ...)
+  fit <- changepoint::cpt.mean((y - stats::median(y)) / robust_marginal_scale(y), method = "PELT", penalty = penalty, ...)
   runtime_sec <- as.numeric(proc.time()[3] - start_time)
 
   # In changepoint, cpts gives segment end indices. For a change between t and t+1, end is t.
@@ -280,8 +273,8 @@ baseline_pelt <- function(y, penalty = "MBIC", ...) {
 # ------------------------------------------------------------------------------
 #' Robust FPOP Baseline Wrapper
 #' @param y Numeric vector of time series observations
-#' @param penalty Penalty for adding a change point (default 2.5 * log(n))
-#' @param min_seg_len Minimum segment length (default 10)
+#' @param penalty Penalty per change on the standardised scale (default 2 * log(n))
+#' @param min_seg_len Minimum segment length for the fallback (default 10)
 #' @return A validated `cpd_fit` object
 #' @export
 baseline_robseg <- function(y, penalty = NULL, min_seg_len = 10) {
@@ -299,7 +292,7 @@ baseline_robseg <- function(y, penalty = NULL, min_seg_len = 10) {
   if (length(cps) > 0) class_vec[cps] <- "shift"
 
   new_cpd_fit(
-    method      = "robseg",
+    method      = fit$method,
     cp          = cps,
     cp_int      = NULL,
     point       = integer(0),
@@ -442,13 +435,20 @@ baseline_envcpt <- function(y, ...) {
 # 10. Chapter 4 Framework (DeCAFS + HS+ Residual Scoring)
 # ------------------------------------------------------------------------------
 #' Chapter 4 Framework Baseline Wrapper
+#'
+#' DeCAFS segmentation followed by horseshoe scoring of the prewhitened, standardised
+#' DeCAFS residuals (approximate port of the thesis Chapter 4 framework). Points are
+#' flagged by Bayesian FDR on p_t = Pr(|psi_t| > d_psi | residuals), the same
+#' exceedance probability used by the proposed method (Eq. 9).
+#'
 #' @param y Numeric vector of time series observations
-#' @param alpha_fdr False discovery rate threshold for residual scoring (default 0.05)
-#' @param n_iter Total Gibbs iterations for residual Horseshoe+ (default 1000)
+#' @param alpha_fdr Bayesian FDR level for residual scoring (default 0.05)
+#' @param n_iter Total Gibbs iterations for residual horseshoe (default 1000)
 #' @param burn_in Burn-in iterations (default 500)
+#' @param d_psi Exceedance threshold in residual SD units (default 1.5)
 #' @return A validated `cpd_fit` object
 #' @export
-baseline_ch4 <- function(y, alpha_fdr = 0.05, n_iter = 1000, burn_in = 500) {
+baseline_ch4 <- function(y, alpha_fdr = 0.05, n_iter = 1000, burn_in = 500, d_psi = 1.5) {
   start_time <- proc.time()[3]
   n <- length(y)
   stopifnot(is.numeric(y), n >= 10)
@@ -459,65 +459,46 @@ baseline_ch4 <- function(y, alpha_fdr = 0.05, n_iter = 1000, burn_in = 500) {
   cp_locs <- sort(unique(cp_locs[cp_locs >= 2L & cp_locs <= n]))
   mu_hat <- decafs_fit$signal
 
-  # Step 2: Residuals and prewhitening
+  # Step 2: prewhiten and standardise residuals
   res <- y - mu_hat
   phi_hat <- as.numeric(decafs_fit$modelParameters$phi)
-  if (is.na(phi_hat) || abs(phi_hat) >= 0.95) phi_hat <- 0.0
-
-  res_pw <- numeric(n)
-  res_pw[1] <- sqrt(1 - phi_hat^2) * res[1]
-  res_pw[2:n] <- res[2:n] - phi_hat * res[1:(n - 1L)]
-
-  # Step 3: Fast Horseshoe+ residual scoring
-  # Residual variance and local outlier scale updates
+  if (length(phi_hat) != 1 || is.na(phi_hat) || abs(phi_hat) >= 0.95) phi_hat <- 0.0
+  res_pw <- c(sqrt(1 - phi_hat^2) * res[1], res[-1] - phi_hat * res[-n])
   sigma_hat <- stats::mad(res_pw)
-  if (sigma_hat <= 1e-6) sigma_hat <- 1.0
+  if (sigma_hat <= 1e-12) sigma_hat <- 1.0
+  r_std <- res_pw / sigma_hat
 
-  nu2 <- rep(1.0, n)
+  # Step 3: horseshoe on psi in r_std = psi + N(0, 1), global scale fixed at 1/sqrt(n)
   lambda_sq <- rep(1.0, n)
   tau_p <- 1.0 / sqrt(n)
-
   o_t_accum <- numeric(n)
-  psi_accum <- numeric(n)
+  exceed <- numeric(n)
   n_saved <- 0L
 
   for (iter in seq_len(n_iter)) {
-    # Outlier draw: psi | y ~ N( (nu^2 / (nu^2 + sigma^2)) * res_pw, (nu^2 * sigma^2) / (nu^2 + sigma^2) )
-    var_post <- (nu2 * sigma_hat^2) / (nu2 + sigma_hat^2)
-    mean_post <- (nu2 / (nu2 + sigma_hat^2)) * res_pw
-    psi_draw <- rnorm(n, mean = mean_post, sd = sqrt(var_post))
-
-    # Auxiliary updates for independent Horseshoe+
-    eta <- 1.0 / rgamma(n, shape = 1.0, rate = 1.0 + 1.0 / lambda_sq)
-    lambda_sq <- 1.0 / rgamma(n, shape = 1.0, rate = 1.0 / eta + psi_draw^2 / (2.0 * tau_p^2))
     nu2 <- tau_p^2 * lambda_sq
+    shrink <- nu2 / (nu2 + 1.0)
+    psi_draw <- rnorm(n, mean = shrink * r_std, sd = sqrt(shrink))
+
+    aux <- 1.0 / rgamma(n, shape = 1.0, rate = 1.0 + 1.0 / lambda_sq)
+    lambda_sq <- 1.0 / rgamma(n, shape = 1.0, rate = 1.0 / aux + psi_draw^2 / (2.0 * tau_p^2))
 
     if (iter > burn_in) {
       n_saved <- n_saved + 1L
-      o_t_accum <- o_t_accum + nu2 / (nu2 + sigma_hat^2)
-      psi_accum <- psi_accum + abs(psi_draw)
+      o_t_accum <- o_t_accum + shrink
+      exceed <- exceed + (abs(psi_draw) > d_psi)
     }
   }
 
   o_t <- o_t_accum / max(1L, n_saved)
-  psi_mean <- psi_accum / max(1L, n_saved)
-
-  # Flag point anomalies via BFDR on outlier probabilities
-  p_psi <- pmin(1.0, o_t) # Under HS+, o_t acts as posterior inclusion score
-  bfdr_res <- bayesian_fdr(p_psi, alpha = alpha_fdr)
-  flagged_points <- setdiff(bfdr_res$flagged, cp_locs)
+  p_psi <- exceed / max(1L, n_saved)
+  flagged_points <- setdiff(bayesian_fdr(p_psi, alpha = alpha_fdr)$flagged, cp_locs)
 
   runtime_sec <- as.numeric(proc.time()[3] - start_time)
 
   class_vec <- rep("nominal", n)
   if (length(cp_locs) > 0) class_vec[cp_locs] <- "shift"
   if (length(flagged_points) > 0) class_vec[flagged_points] <- "point"
-
-  scores_df <- data.frame(
-    t     = seq_len(n),
-    s_cp  = rep(NA_real_, n),
-    s_out = o_t
-  )
 
   new_cpd_fit(
     method      = "ch4",
@@ -526,19 +507,21 @@ baseline_ch4 <- function(y, alpha_fdr = 0.05, n_iter = 1000, burn_in = 500) {
     point       = as.integer(flagged_points),
     collective  = NULL,
     class       = factor(class_vec, levels = CPD_CLASS_LEVELS),
-    scores      = scores_df,
+    scores      = data.frame(t = seq_len(n), s_cp = rep(NA_real_, n), s_out = o_t),
     runtime_sec = runtime_sec,
-    diag        = list(decafs = decafs_fit, o_t = o_t, psi_mean = psi_mean)
+    diag        = list(decafs = decafs_fit, o_t = o_t, p_psi = p_psi)
   )
 }
 
 # ------------------------------------------------------------------------------
 # 11. FPNN (Fourier Probabilistic Neural Network, JISPS Paper Port)
 # ------------------------------------------------------------------------------
-#' FPNN Baseline Wrapper (Ported from JISPS paper)
+#' FPNN Placeholder Baseline (NOT the JISPS implementation)
 #'
-#' Fits a non-parametric Fejer-weighted Fourier expansion on sliding window
-#' CUSUM and spectral features to estimate change point probability.
+#' Heuristic stand-in: an unsupervised Fejer-weighted Fourier density ratio on
+#' sliding-window mean/variance contrasts. The JISPS FPNN (Python, in
+#' changepoint-evdecafs/src) has not been ported yet, so this fit is labelled
+#' "fpnn_placeholder" and must not be reported as FPNN.
 #'
 #' @param y Numeric vector of time series observations
 #' @param window_len Half-window size for local contrast features (default 15)
@@ -644,7 +627,7 @@ baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
   )
 
   new_cpd_fit(
-    method      = "fpnn",
+    method      = "fpnn_placeholder",
     cp          = cps,
     cp_int      = NULL,
     point       = integer(0),

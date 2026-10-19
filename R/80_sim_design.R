@@ -126,29 +126,7 @@ run_method_on_replicate <- function(sim, method, m_args = list()) {
 
   fit <- tryCatch({
     if (method == "proposed") {
-      # Proposed method: prior map + production Gibbs sampler
-      # 1. Front-ends
-      intervals <- run_frontend_nsp(y, alpha = 0.05)
-      capa_res  <- run_frontend_capa(y, prewhiten = TRUE)
-      prior_maps <- build_prior_maps(n = n, nsp_intervals = intervals$intervals, capa_results = capa_res, kappa_in = 2.0)
-
-      n_iter   <- if (!is.null(m_args$n_iter)) m_args$n_iter else 2500
-      burn_in  <- if (!is.null(m_args$burn_in)) m_args$burn_in else 1000
-      n_chains <- if (!is.null(m_args$n_chains)) m_args$n_chains else 2
-
-      gibbs_sampler(
-        y               = y,
-        kappa           = prior_maps$kappa,
-        a_vec           = prior_maps$a,
-        n_iter          = n_iter,
-        burn_in         = burn_in,
-        thin            = 1,
-        n_chains        = n_chains,
-        dynamic         = TRUE,
-        delta           = 1.0,
-        capa_collective = capa_res$collective,
-        alpha_fdr       = 0.05
-      )
+      do.call(fit_proposed, c(list(y = y), modifyList(list(n_iter = 2500, burn_in = 1000, n_chains = 2), m_args)))
     } else if (method == "copula") {
       fit_copula_comparator(y, alpha = 0.05, B_boot = if (!is.null(m_args$B_boot)) m_args$B_boot else 50)
     } else {
@@ -166,7 +144,7 @@ run_method_on_replicate <- function(sim, method, m_args = list()) {
       method      = method,
       runtime_sec = NA_real_,
       cp          = list(precision = NA_real_, recall = NA_real_, f1 = NA_real_, hausdorff = NA_real_, covering = NA_real_),
-      point       = list(precision = NA_real_, recall = NA_real_, f1 = NA_real_, realised_fdr = NA_real_),
+      point       = list(precision = NA_real_, recall = NA_real_, f1 = NA_real_, realised_fdr = NA_real_, pr_auc = NA_real_),
       collective  = list(precision = NA_real_, recall = NA_real_, f1 = NA_real_),
       four_class  = list(macro_f1 = NA_real_)
     ))
@@ -245,6 +223,7 @@ run_pilot_simulation <- function(
           cp_covering   = eval_res$cp$covering,
           pt_f1         = eval_res$point$f1,
           pt_fdr        = eval_res$point$realised_fdr,
+          pt_prauc      = if (!is.null(eval_res$point$pr_auc)) eval_res$point$pr_auc else NA_real_,
           coll_f1       = eval_res$collective$f1,
           macro_f1      = eval_res$four_class$macro_f1,
           stringsAsFactors = FALSE

@@ -10,8 +10,10 @@ suppressPackageStartupMessages({
 
 if (file.exists("R/00_utils.R")) {
   source("R/00_utils.R")
+  source("R/21_frontend_capa.R")
 } else if (file.exists("../../R/00_utils.R")) {
   source("../../R/00_utils.R")
+  source("../../R/21_frontend_capa.R")
 }
 
 #' Tukey's Biweight Loss Function and Location M-Estimator
@@ -29,41 +31,42 @@ biweight_loss <- function(e, c = 4.685) {
 
 #' Fit Robust Piecewise-Constant Location
 #'
-#' Estimates piecewise location using robust loss (Tukey's biweight) to ensure
-#' residuals are robust to outliers and mean shifts, independently of the proposed model.
+#' Estimates a piecewise-constant location with Tukey's biweight loss, independently
+#' of the proposed model. Uses robust FPOP (`robseg::Rob_seg.std`, loss = "Outlier")
+#' on the series scaled by its robust marginal noise SD (robust_marginal_scale; robust
+#' FPOP assumes independent noise), with the settings recommended by its authors:
+#' lambda = penalty (default 2 log n, in units of that variance) and lthreshold = 3. If robseg is unavailable, falls back to a biweight binary
+#' segmentation (`method = "biweight_binseg"` in the result).
 #'
 #' @param y Numeric vector of observations (length n)
-#' @param min_seg_len Minimum segment length between changes (default 10)
-#' @param penalty Penalty for adding a change point (default 2 * log(n))
+#' @param min_seg_len Minimum segment length for the fallback binary segmentation (default 10)
+#' @param penalty Penalty per change on the standardised scale (default 2 * log(n))
+#' @param lthreshold Biweight threshold on the standardised scale (default 3)
 #'
 #' @return A list with elements:
 #'   \item{mu_hat}{Numeric vector of length n of fitted piecewise constants}
 #'   \item{residuals}{Numeric vector of residuals r_t = y_t - mu_hat_t}
-#'   \item{cp}{Integer vector of estimated change point locations}
+#'   \item{cp}{Integer vector of estimated change point locations (first index of each new segment)}
+#'   \item{method}{"robseg" or "biweight_binseg"}
 #' @export
-fit_robust_location <- function(y, min_seg_len = 10, penalty = NULL) {
+fit_robust_location <- function(y, min_seg_len = 10, penalty = NULL, lthreshold = 3) {
   n <- length(y)
   stopifnot(is.numeric(y), n >= min_seg_len)
 
-  if (is.null(penalty)) {
-    penalty <- 2.5 * log(n)
-  }
+  if (is.null(penalty)) penalty <- 2 * log(n)
 
-  # Estimate robust scale of innovations
-  sigma_rob <- stats::mad(diff(y)) / sqrt(2)
-  if (sigma_rob <= 1e-8) sigma_rob <- stats::mad(y)
-  if (sigma_rob <= 1e-8) sigma_rob <- 1.0
+  std <- list(center = stats::median(y), scale = robust_marginal_scale(y))
+  std$z <- (y - std$center) / std$scale
 
-  # If robseg package is available, use Rob_FPOP
   if (requireNamespace("robseg", quietly = TRUE)) {
-    try_rob <- tryCatch({
-      fit_rfpop <- robseg::Rob_FPOP(y, beta = penalty * sigma_rob^2)
-      cp_locs <- fit_rfpop$t.est
-      mu_hat <- fit_rfpop$step_levels
-      list(mu_hat = mu_hat, residuals = y - mu_hat, cp = cp_locs)
-    }, error = function(e) NULL)
-    if (!is.null(try_rob)) return(try_rob)
+    rfit <- robseg::Rob_seg.std(x = std$z, loss = "Outlier", lambda = penalty, lthreshold = lthreshold)
+    ends <- as.integer(rfit$t.est)
+    cp_locs <- ends[ends < n] + 1L
+    mu_hat <- as.numeric(rfit$smt) * std$scale + std$center
+    return(list(mu_hat = mu_hat, residuals = y - mu_hat, cp = cp_locs, method = "robseg"))
   }
+
+  sigma_rob <- std$scale
 
   # Standalone robust binary segmentation with biweight loss
   # Helper: biweight location M-estimator for a segment
@@ -138,7 +141,8 @@ fit_robust_location <- function(y, min_seg_len = 10, penalty = NULL) {
   list(
     mu_hat    = mu_hat,
     residuals = residuals,
-    cp        = cps
+    cp        = cps,
+    method    = "biweight_binseg"
   )
 }
 

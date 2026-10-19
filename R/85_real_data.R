@@ -92,14 +92,16 @@ load_real_series <- function(name = c("welllog", "oilwell", "indpro", "btc"),
   } else if (name == "btc") {
     csv_path <- file.path(raw_dir, "btc_usd.csv")
     df <- read.csv(csv_path)
-    # Filter 2018-01-01 to 2023-12-31 as in thesis/workflow benchmark (2,191 points)
+    # 2018-01-01 to 2023-12-31 (2,191 prices). Spec change C6: the log price is a unit-root
+    # series (|phi| <= 0.95 cannot represent it), so the model is fitted to daily log returns.
     df_sub <- subset(df, date >= "2018-01-01" & date <= "2023-12-31")
-    y <- as.numeric(df_sub$log_price)
-    dates <- as.character(df_sub$date)
-    stopifnot(length(y) == 2191, !anyNA(y))
+    lp <- as.numeric(df_sub$log_price)
+    stopifnot(length(lp) == 2191, !anyNA(lp))
+    y <- diff(lp)
+    dates <- as.character(df_sub$date)[-1]
     return(list(
       name        = "btc",
-      description = "Bitcoin / USD daily log price (2,191 obs, 2018-01-01 to 2023-12-31)",
+      description = "Bitcoin / USD daily log return (2,190 obs, 2018-01-02 to 2023-12-31)",
       y           = y,
       n           = length(y),
       dates       = dates
@@ -123,34 +125,7 @@ run_real_data_method <- function(y, method = "proposed", m_args = list()) {
 
   fit <- tryCatch({
     if (method == "proposed") {
-      alpha_nsp <- if (!is.null(m_args$alpha_nsp)) m_args$alpha_nsp else 0.05
-      kappa_in  <- if (!is.null(m_args$kappa_in)) m_args$kappa_in else 2.0
-      delta     <- if (!is.null(m_args$delta)) m_args$delta else 1.0
-      n_iter    <- if (!is.null(m_args$n_iter)) m_args$n_iter else 2500
-      burn_in   <- if (!is.null(m_args$burn_in)) m_args$burn_in else 1000
-      n_chains  <- if (!is.null(m_args$n_chains)) m_args$n_chains else 2
-      alpha_fdr <- if (!is.null(m_args$alpha_fdr)) m_args$alpha_fdr else 0.05
-      dynamic   <- if (!is.null(m_args$dynamic)) m_args$dynamic else TRUE
-
-      # Front-ends
-      intervals  <- run_frontend_nsp(y, alpha = alpha_nsp)
-      capa_res   <- run_frontend_capa(y, prewhiten = TRUE)
-      prior_maps <- build_prior_maps(n = n, nsp_intervals = intervals$intervals,
-                                     capa_results = capa_res, kappa_in = kappa_in)
-
-      gibbs_sampler(
-        y               = y,
-        kappa           = prior_maps$kappa,
-        a_vec           = prior_maps$a,
-        n_iter          = n_iter,
-        burn_in         = burn_in,
-        thin            = 1,
-        n_chains        = n_chains,
-        dynamic         = dynamic,
-        delta           = delta,
-        capa_collective = capa_res$collective,
-        alpha_fdr       = alpha_fdr
-      )
+      do.call(fit_proposed, c(list(y = y), modifyList(list(n_iter = 2500, burn_in = 1000, n_chains = 2), m_args)))
     } else if (method == "copula") {
       b_boot <- if (!is.null(m_args$B_boot)) m_args$B_boot else 50
       fit_copula_comparator(y, alpha = 0.05, B_boot = b_boot)
@@ -165,6 +140,7 @@ run_real_data_method <- function(y, method = "proposed", m_args = list()) {
   if (is.null(fit)) {
     return(new_cpd_fit(
       method      = method,
+      class       = factor(rep("nominal", n), levels = CPD_CLASS_LEVELS),
       runtime_sec = as.numeric(proc.time()[3] - t0),
       diag        = list(failed = TRUE)
     ))
@@ -194,6 +170,7 @@ summarize_real_data_fit <- function(fit, series_name = "") {
   data.frame(
     series       = series_name,
     method       = fit$method,
+    failed       = isTRUE(fit$diag$failed),
     n_cp         = n_cp,
     n_point      = n_pt,
     n_coll_segs  = n_coll_segs,

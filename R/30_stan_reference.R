@@ -6,11 +6,13 @@
 
 if (file.exists("R/00_utils.R")) {
   source("R/00_utils.R")
+  source("R/32_gibbs_updates.R")
   source("R/40_scoring.R")
   source("R/41_bfdr.R")
   source("R/42_classify.R")
 } else if (file.exists("../../R/00_utils.R")) {
   source("../../R/00_utils.R")
+  source("../../R/32_gibbs_updates.R")
   source("../../R/40_scoring.R")
   source("../../R/41_bfdr.R")
   source("../../R/42_classify.R")
@@ -23,24 +25,23 @@ suppressPackageStartupMessages({
 
 #' Fit Stan Reference Model
 #'
-#' Fits the reference model with non-centred Horseshoe+ increments and independent
-#' outlier scales (rho = 0, delta = 0) under prewhitened AR(1) likelihood.
-#' Intended for n <= 300 validation.
+#' Fits the reference model with non-centred horseshoe+ increments and independent
+#' outlier scales (rho = 0, delta = 0) under the prewhitened AR(1) likelihood.
+#' Like the Gibbs sampler, the model is fitted to robust_standardize(y) and levels
+#' are back-transformed. Intended for n <= 300 validation.
 #'
 #' @param y Numeric vector of time series observations
 #' @param kappa Numeric vector of local shrinkage multipliers (default rep(1.0, length(y)))
-#' @param alpha_fdr False discovery rate threshold for candidate selection (default 0.05)
-#' @param chains Number of MCMC chains (default 2)
-#' @param parallel_chains Number of parallel chains (default 2)
-#' @param iter_warmup Number of warmup iterations per chain (default 500)
-#' @param iter_sampling Number of sampling iterations per chain (default 500)
-#' @param adapt_delta NUTS target acceptance rate (default 0.99)
-#' @param max_treedepth Maximum NUTS treedepth (default 12)
-#' @param init Initialization radius or value (default 0.5)
+#' @param alpha_fdr Bayesian FDR level for candidate selection (default 0.05)
+#' @param capa_collective,L_max,r Collective-anomaly rule inputs (Section 3.6)
+#' @param d_omega,d_psi Threshold multipliers of the marginal noise SD (Eq. 9)
+#' @param use_slab Logical; TRUE uses the regularised slab (not the Gibbs model)
+#' @param chains,parallel_chains,iter_warmup,iter_sampling,adapt_delta,max_treedepth,init NUTS settings
 #' @param seed Random seed for Stan sampling
-#' @param stan_file Path to Stan reference model file (default "stan/hsplus_ar1_ref.stan")
+#' @param stan_file Path to Stan reference model file
 #'
-#' @return A validated `cpd_fit` object
+#' @return A validated `cpd_fit` object; `diag` holds posterior summaries and
+#'   90% interval endpoints for mu_t and o_t
 #' @export
 fit_stan_reference <- function(
     y,
@@ -49,6 +50,9 @@ fit_stan_reference <- function(
     capa_collective = NULL,
     L_max = NULL,
     r = 0.3,
+    d_omega = 1.5,
+    d_psi = 1.5,
+    use_slab = FALSE,
     chains = 2,
     parallel_chains = 2,
     iter_warmup = 500,
@@ -63,24 +67,22 @@ fit_stan_reference <- function(
   n <- length(y)
   stopifnot(n >= 10, is.numeric(y))
 
-  if (is.null(kappa)) {
-    kappa <- rep(1.0, n)
-  }
+  if (is.null(kappa)) kappa <- rep(1.0, n)
   stopifnot(length(kappa) == n)
+  if (!file.exists(stan_file)) stop("Stan reference model file not found: ", stan_file)
 
-  if (!file.exists(stan_file)) {
-    stop("Stan reference model file not found: ", stan_file)
-  }
-
+  std <- robust_standardize(y)
   mod <- cmdstan_model(stan_file)
 
   stan_data <- list(
     n          = n,
-    y          = as.vector(y),
+    y          = as.vector(std$z),
     kappa      = as.vector(kappa),
     s_tau      = 1.0 / sqrt(n),
     a_phi      = 10.0,
     b_phi      = 2.0,
+    mu1_sd     = sqrt(MU1_PRIOR_VAR),
+    use_slab   = as.integer(isTRUE(use_slab)),
     slab_scale = 5.0,
     slab_df    = 4.0,
     sigma_min  = 1e-4,
@@ -103,49 +105,53 @@ fit_stan_reference <- function(
 
   runtime_sec <- proc.time()[3] - start_time
 
-  # Extract posterior draws
-  draws <- fit$draws()
-  summ <- fit$summary(c("phi", "sigma", "tau_omega", "tau_psi"))
+  # Global draws on the same scale as the Gibbs sampler (sigma, tau_psi in data units)
+  gdraws <- fit$draws(c("phi", "sigma", "tau_omega", "tau_psi"))
+  gdraws[, , "sigma"] <- gdraws[, , "sigma"] * std$scale
+  gdraws[, , "tau_psi"] <- gdraws[, , "tau_psi"] * std$scale
+  summ <- summarize_draws(gdraws)
+  draws_mat <- function(v) as_draws_matrix(fit$draws(v))
+  phi_d   <- as.vector(draws_mat("phi"))
+  sigma_d <- as.vector(draws_mat("sigma"))
+  sigma_marg_d <- sigma_d / sqrt(1.0 - phi_d^2)
 
-  # Posterior means
-  phi_hat <- as.numeric(summ$mean[summ$variable == "phi"])
-  sigma_hat <- as.numeric(summ$mean[summ$variable == "sigma"])
-  sigma_marg_hat <- sigma_hat / sqrt(1.0 - phi_hat^2)
+  omega_mat <- draws_mat("omega")
+  psi_mat   <- draws_mat("psi")
+  mu_mat    <- draws_mat("mu")
+  o_t_mat   <- draws_mat("o_t")
 
-  # Outlier scores o_t from generated quantities
-  o_t_draws <- fit$draws("o_t")
-  o_t_mat <- as_draws_matrix(o_t_draws)
-  o_t_mean <- colMeans(o_t_mat)
+  # Eq. 9 with per-draw thresholds, as in the Gibbs sampler
+  p_omega <- colMeans(abs(omega_mat) > d_omega * sigma_marg_d)
+  p_psi   <- colMeans(abs(psi_mat) > d_psi * sigma_marg_d)
 
-  # Increment scores p_omega (Pr(|omega_t| > 1.5 * sigma_marg))
-  omega_draws <- fit$draws("omega")
-  omega_mat <- as_draws_matrix(omega_draws)
-  d_omega <- 1.5 * sigma_marg_hat
-  p_omega <- colMeans(abs(omega_mat) > d_omega)
+  q90 <- function(m) apply(m, 2, stats::quantile, probs = c(0.05, 0.95), names = FALSE)
+  mu_q <- q90(mu_mat) * std$scale + std$center
+  o_q  <- q90(o_t_mat)
 
-  # Outlier draws p_psi (Pr(|psi_t| > 1.5 * sigma_marg))
-  psi_draws <- fit$draws("psi")
-  psi_mat <- as_draws_matrix(psi_draws)
-  d_psi <- 1.5 * sigma_marg_hat
-  p_psi <- colMeans(abs(psi_mat) > d_psi)
-
-  mu_draws <- fit$draws("mu")
-  mu_mat <- as_draws_matrix(mu_draws)
-  mu_mean <- colMeans(mu_mat)
+  sampler_diag <- fit$diagnostic_summary(quiet = TRUE)
 
   diag_list <- list(
-    summary   = summ,
-    max_rhat  = max(summ$rhat, na.rm = TRUE),
-    min_ess   = min(summ$ess_bulk, na.rm = TRUE),
-    phi_hat   = phi_hat,
-    sigma_hat = sigma_hat,
-    mu_mean   = mu_mean
+    summary       = summ,
+    max_rhat      = max(summ$rhat, na.rm = TRUE),
+    min_ess       = min(summ$ess_bulk, na.rm = TRUE),
+    phi_hat       = mean(phi_d),
+    sigma_hat     = mean(sigma_d) * std$scale,
+    draws         = gdraws,
+    tau_omega_hat = mean(as.vector(draws_mat("tau_omega"))),
+    mu_mean       = colMeans(mu_mat) * std$scale + std$center,
+    mu_sd         = apply(mu_mat, 2, stats::sd) * std$scale,
+    mu_q05        = mu_q[1, ],
+    mu_q95        = mu_q[2, ],
+    o_t_q05       = o_q[1, ],
+    o_t_q95       = o_q[2, ],
+    num_divergent = sum(sampler_diag$num_divergent),
+    standardization = std[c("center", "scale")]
   )
 
   classify_and_build_fit(
     y               = y,
-    mu_hat          = mu_mean,
-    s_out           = o_t_mean,
+    mu_hat          = diag_list$mu_mean,
+    s_out           = colMeans(o_t_mat),
     p_omega         = p_omega,
     p_psi           = p_psi,
     alpha_fdr       = alpha_fdr,

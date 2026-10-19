@@ -2,7 +2,7 @@ Package: cpdshrinkage
 Title: Significance-Guided Global-Local Shrinkage for Change Points, Collective Anomalies and Outliers
 Version: 0.1.0
 Authors@R: c(
-    person("Agniva", "Das", email = "agniva.das@example.com", role = c("aut", "cre")),
+    person("Agniva", "Das", email = "agniva.d-statphd@msubaroda.ac.in", role = c("aut", "cre")),
     person("Muralidharan", "Kunnummal", role = "aut")
   )
 Description: Implementation of significance-guided global-local shrinkage for distinguishing change points, collective anomalies and point outliers in autocorrelated time series.
@@ -19,7 +19,9 @@ Imports:
     targets,
     tarchetypes,
     future,
+    future.apply,
     furrr,
+    MASS,
     posterior,
     coda,
     nsp,
@@ -31,9 +33,13 @@ Imports:
     stepR,
     bcp,
     EnvCpt,
+    robseg,
     ggplot2,
     patchwork,
+    knitr,
     kableExtra
+Remotes:
+    guillemr/robust-fpop
 Suggests:
     testthat (>= 3.0.0),
     cmdstanr

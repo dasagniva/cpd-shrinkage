@@ -1,8 +1,12 @@
 # ==============================================================================
 # gate_p2_verification.R
-# Acceptance gate verification for Phase P2:
-# 1. NSP false-interval rate on null series under phi in {0, 0.6, 0.9} <= alpha_NSP
-# 2. CAPA point-anomaly false-positive rate under phi = 0.9 with vs without prewhitening
+# Acceptance Gate for Phase P2 (CPD2_Code_Workflow.md):
+# 1. On null series (no changes) with phi in {0, 0.6, 0.9}, the NSP false-interval
+#    rate is at most alpha_NSP (200 replicates), for the front-end configuration the
+#    pipeline uses (run_frontend_nsp default: nsp_poly_ar, ord = 1, deg = 0; spec
+#    change C1). The self-normalised NSP named in the spec is reported for comparison.
+# 2. CAPA's point-anomaly false-positive rate under phi = 0.9 is reported with and
+#    without prewhitening.
 # ==============================================================================
 
 source("R/00_utils.R")
@@ -13,96 +17,51 @@ source("R/22_prior_map.R")
 
 log_msg("=== Starting Phase P2 Gate Verification ===")
 
-alpha_nsp <- 0.10
+alpha_nsp <- 0.05 # level used by the pipeline (fit_proposed default)
 n_pts <- 300
-reps <- 60
+reps <- 200
 phi_grid <- c(0.0, 0.6, 0.9)
 
-cat("\n--- 1. Autoregressive NSP (nsp_poly_ar) Null Calibration (Target <= 0.10) ---\n")
-nsp_ar_results <- list()
+null_series <- function(phi_val, b) {
+  simulate_series(n = n_pts, phi = phi_val, k0 = 0, outlier_regime = "none", collective = 0,
+                  seed = 20261000L + as.integer(phi_val * 1000) + b)$y
+}
 
+nsp_rows <- list()
 for (phi_val in phi_grid) {
-  false_count <- 0
+  fi_sn <- logical(reps)
+  fi_ar <- logical(reps)
   for (b in seq_len(reps)) {
-    sim <- simulate_series(
-      n = n_pts,
-      phi = phi_val,
-      noise = "gaussian",
-      k0 = 0,
-      outlier_regime = "none",
-      collective = 0,
-      seed = 20261000L + as.integer(phi_val * 1000) + b
-    )
-    nsp_out <- run_frontend_nsp(sim$y, alpha = alpha_nsp, method = "ar", M = 500, min_size = 20)
-    if (nrow(nsp_out$intervals) > 0) {
-      false_count <- false_count + 1
-    }
+    y <- null_series(phi_val, b)
+    fi_sn[b] <- nrow(run_frontend_nsp(y, alpha = alpha_nsp, method = "selfnorm")$intervals) > 0
+    fi_ar[b] <- nrow(run_frontend_nsp(y, alpha = alpha_nsp, method = "ar")$intervals) > 0
   }
-  fir <- false_count / reps
-  se <- sqrt(fir * (1 - fir) / reps)
-  nsp_ar_results[[as.character(phi_val)]] <- c(fir = fir, se = se)
-  cat(sprintf("phi: %.1f | nsp_poly_ar FIR: %.3f (MC SE: %.3f) | Target <= %.2f\n",
-              phi_val, fir, se, alpha_nsp))
-}
-
-cat("\n--- 2. Self-Normalised NSP (nsp_poly_selfnorm) Null Comparison ---\n")
-for (phi_val in c(0.0, 0.6)) {
-  false_count_raw <- 0
-  false_count_pw  <- 0
-  n_sub <- 30
-  for (b in seq_len(n_sub)) {
-    sim <- simulate_series(
-      n = n_pts,
-      phi = phi_val,
-      noise = "gaussian",
-      k0 = 0,
-      outlier_regime = "none",
-      collective = 0,
-      seed = 20263000L + as.integer(phi_val * 1000) + b
-    )
-    r_raw <- run_frontend_nsp(sim$y, alpha = alpha_nsp, method = "selfnorm", prewhiten = FALSE, M = 300)
-    r_pw  <- run_frontend_nsp(sim$y, alpha = alpha_nsp, method = "selfnorm", prewhiten = TRUE, M = 300)
-    if (nrow(r_raw$intervals) > 0) false_count_raw <- false_count_raw + 1
-    if (nrow(r_pw$intervals) > 0) false_count_pw <- false_count_pw + 1
-  }
-  cat(sprintf("phi: %.1f | raw selfnorm FIR: %.2f | prewhitened selfnorm FIR: %.2f\n",
-              phi_val, false_count_raw / n_sub, false_count_pw / n_sub))
-}
-
-cat("\n--- 3. CAPA Prewhitening Ablation under phi = 0.90 ---\n")
-capa_reps <- 60
-false_pts_raw <- 0
-false_pts_pw  <- 0
-
-for (b in seq_len(capa_reps)) {
-  sim <- simulate_series(
-    n = n_pts,
-    phi = 0.90,
-    noise = "gaussian",
-    k0 = 0,
-    outlier_regime = "none",
-    collective = 0,
-    seed = 20264000L + b
+  nsp_rows[[length(nsp_rows) + 1]] <- data.frame(
+    phi = phi_val,
+    fir_selfnorm = mean(fi_sn), se_selfnorm = sqrt(mean(fi_sn) * (1 - mean(fi_sn)) / reps),
+    fir_ar = mean(fi_ar), se_ar = sqrt(mean(fi_ar) * (1 - mean(fi_ar)) / reps)
   )
-  capa_raw <- run_frontend_capa(sim$y, prewhiten = FALSE, type = "mean")
-  false_pts_raw <- false_pts_raw + length(capa_raw$point)
-
-  capa_pw <- run_frontend_capa(sim$y, prewhiten = TRUE, type = "mean")
-  false_pts_pw <- false_pts_pw + length(capa_pw$point)
+  cat(sprintf("phi %.1f | selfnorm FIR %.3f | ar FIR %.3f | target <= %.2f\n",
+              phi_val, mean(fi_sn), mean(fi_ar), alpha_nsp))
 }
+nsp_tab <- do.call(rbind, nsp_rows)
 
-mean_fp_raw <- false_pts_raw / capa_reps
-mean_fp_pw  <- false_pts_pw / capa_reps
-
-cat(sprintf("CAPA raw (no prewhitening) mean false points per series: %.3f\n", mean_fp_raw))
-cat(sprintf("CAPA prewhitened           mean false points per series: %.3f\n", mean_fp_pw))
-
-cat("\n=== Phase P2 Gate Conclusion ===\n")
-all_nsp_pass <- all(sapply(nsp_ar_results, function(x) x["fir"] <= alpha_nsp + 2 * x["se"]))
-if (all_nsp_pass) {
-  cat("[PASS] Autoregressive NSP null false-interval rates meet the acceptance gate (<= alpha_NSP).\n")
-} else {
-  cat("[FAIL] False interval rate exceeded nominal tolerance.\n")
+capa_reps <- 60
+fp_raw <- numeric(capa_reps)
+fp_pw <- numeric(capa_reps)
+for (b in seq_len(capa_reps)) {
+  y <- simulate_series(n = n_pts, phi = 0.9, k0 = 0, outlier_regime = "none", collective = 0, seed = 20264000L + b)$y
+  fp_raw[b] <- length(run_frontend_capa(y, prewhiten = FALSE)$point)
+  fp_pw[b] <- length(run_frontend_capa(y, prewhiten = TRUE)$point)
 }
-cat(sprintf("[LOGGED] CAPA point-anomaly FPR recorded under phi=0.90 (raw: %.3f, prewhitened: %.3f).\n",
-            mean_fp_raw, mean_fp_pw))
+cat(sprintf("CAPA mean false points per series under phi = 0.9: raw %.3f, prewhitened %.3f\n", mean(fp_raw), mean(fp_pw)))
+
+# Pass if the pipeline front-end's (nsp_poly_ar) FIR is within 2 MC SE of alpha_NSP at every phi
+nsp_pass <- all(nsp_tab$fir_ar <= alpha_nsp + 2 * sqrt(alpha_nsp * (1 - alpha_nsp) / reps))
+
+saveRDS(list(nsp = nsp_tab, capa_fp_raw = mean(fp_raw), capa_fp_prewhitened = mean(fp_pw),
+             alpha_nsp = alpha_nsp, reps = reps, nsp_pass = nsp_pass, timestamp = Sys.time()),
+        file = "output/gate_p2_results.rds")
+
+if (!nsp_pass) stop("Phase P2 acceptance gate FAILED: NSP false-interval rate exceeds alpha_NSP for the pipeline front-end")
+cat(">>> PHASE P2 ACCEPTANCE GATE: PASSED <<<\n")

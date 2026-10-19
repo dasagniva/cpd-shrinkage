@@ -140,7 +140,7 @@ plot_four_panel_real_data <- function(fits_list, data_list, output_file = "outpu
   p_ip <- plot_fit_panel(fits_list$indpro, data_list$indpro$y, dates = data_list$indpro$dates,
                          title = "C. US Industrial Production Monthly Log Growth (n = 312)")
   p_bc <- plot_fit_panel(fits_list$btc, data_list$btc$y, dates = data_list$btc$dates,
-                         title = "D. Bitcoin Daily Log-Price 2018-2023 (n = 2,191)")
+                         title = "D. Bitcoin Daily Log Return 2018-2023 (n = 2,190)")
 
   combined <- (p_wl | p_ow) / (p_ip | p_bc) +
     plot_layout(guides = "collect") &
@@ -322,10 +322,11 @@ table_real_data_latex <- function(summary_df, output_file = "output/tab2_real_da
 #' @return Formatted character string of LaTeX code
 #' @export
 table_ablation_latex <- function(ablation_df, output_file = "output/tab3_ablation.tex") {
-  cols_keep <- intersect(names(ablation_df), c("ablation", "description", "n_cp", "n_point", "n_coll", "cp_f1", "macro_f1", "runtime_sec"))
+  cols_keep <- intersect(names(ablation_df), c("ablation", "description", "n_cp", "n_point", "n_coll", "cp_f1", "pt_f1", "pt_prauc", "macro_f1", "runtime_sec"))
   df_tab <- ablation_df[, cols_keep]
 
   if ("cp_f1" %in% names(df_tab)) df_tab$cp_f1 <- sprintf("%.3f", df_tab$cp_f1)
+  for (cc in intersect(c("pt_f1", "pt_prauc", "coll_f1"), names(df_tab))) df_tab[[cc]] <- sprintf("%.3f", df_tab[[cc]])
   if ("macro_f1" %in% names(df_tab)) df_tab$macro_f1 <- sprintf("%.3f", df_tab$macro_f1)
   if ("runtime_sec" %in% names(df_tab)) df_tab$runtime_sec <- sprintf("%.2f s", df_tab$runtime_sec)
 
@@ -349,10 +350,11 @@ table_ablation_latex <- function(ablation_df, output_file = "output/tab3_ablatio
 #' @return Formatted character string of LaTeX code
 #' @export
 table_sensitivity_latex <- function(sens_df, output_file = "output/tab4_sensitivity.tex") {
-  cols_keep <- intersect(names(sens_df), c("param", "val", "n_cp", "n_point", "n_coll", "cp_f1", "macro_f1", "runtime_sec"))
+  cols_keep <- intersect(names(sens_df), c("param", "val", "n_cp", "n_point", "n_coll", "cp_f1", "pt_f1", "pt_prauc", "coll_f1", "macro_f1", "runtime_sec"))
   df_tab <- sens_df[, cols_keep]
 
   if ("cp_f1" %in% names(df_tab)) df_tab$cp_f1 <- sprintf("%.3f", df_tab$cp_f1)
+  for (cc in intersect(c("pt_f1", "pt_prauc", "coll_f1"), names(df_tab))) df_tab[[cc]] <- sprintf("%.3f", df_tab[[cc]])
   if ("macro_f1" %in% names(df_tab)) df_tab$macro_f1 <- sprintf("%.3f", df_tab$macro_f1)
   if ("runtime_sec" %in% names(df_tab)) df_tab$runtime_sec <- sprintf("%.2f s", df_tab$runtime_sec)
 

@@ -69,7 +69,7 @@ for (i in seq_len(n_recovery)) {
   )
 
   # Compute front-end prior maps
-  nsp_res <- run_frontend_nsp(sim$y, alpha = 0.1, method = "ar")
+  nsp_res <- run_frontend_nsp(sim$y, alpha = 0.05)
   capa_res <- run_frontend_capa(sim$y, prewhiten = TRUE)
   pmap <- build_prior_maps(n = n_len, nsp_intervals = nsp_res$intervals, capa_results = capa_res, kappa_in = 2.0)
 
@@ -80,6 +80,8 @@ for (i in seq_len(n_recovery)) {
     s_tau      = 1.0 / sqrt(n_len),
     a_phi      = 10.0,
     b_phi      = 2.0,
+    mu1_sd     = 100.0,
+    use_slab   = 0L,
     slab_scale = 5.0,
     slab_df    = 4.0,
     sigma_min  = 1e-4,
@@ -167,29 +169,19 @@ for (k in seq_len(n_sbc)) {
   prior_tau_omega <- abs(rcauchy(1, 0, s_tau))
   prior_tau_psi <- abs(rcauchy(1, 0, 1.0 / sqrt(n_sbc_len)))
 
-  # 4. Horseshoe+ hierarchy for increments and outliers
-  c2_tilde <- 1.0 / rgamma(1, 2.0, 2.0)
-  c2 <- 25.0 * c2_tilde
-
+  # 4. Horseshoe+ hierarchy for increments and outliers (no slab: use_slab = 0)
   eta_omega <- abs(rcauchy(n_sbc_len - 1, 0, 1))
   lambda_omega <- abs(rcauchy(n_sbc_len - 1, 0, 1))
-  z_omega <- rnorm(n_sbc_len - 1)
-  lam_w <- pmin(eta_omega * lambda_omega, 1e4)
-  tau_lam_w <- pmin(prior_tau_omega * lam_w, 1e4)
-  eff_lam_w <- sqrt(c2 * (lam_w^2) / (c2 + (tau_lam_w^2)))
-  omega <- prior_sigma * prior_tau_omega * eff_lam_w * z_omega
+  omega <- prior_sigma * prior_tau_omega * eta_omega * lambda_omega * rnorm(n_sbc_len - 1)
 
   mu <- numeric(n_sbc_len)
-  mu[1] <- rnorm(1, 0, 10.0 * prior_sigma)
+  mu[1] <- rnorm(1, 0, 10.0)
   for (t in 2:n_sbc_len) mu[t] <- mu[t - 1] + omega[t - 1]
 
+  # psi_t ~ N(0, tau_psi^2 eta^2 lambda^2): not scaled by sigma, as in the Stan model
   eta_psi <- abs(rcauchy(n_sbc_len, 0, 1))
   lambda_psi <- abs(rcauchy(n_sbc_len, 0, 1))
-  z_psi <- rnorm(n_sbc_len)
-  lam_p <- pmin(eta_psi * lambda_psi, 1e4)
-  tau_lam_p <- pmin(prior_tau_psi * lam_p, 1e4)
-  eff_lam_p <- sqrt(c2 * (lam_p^2) / (c2 + (tau_lam_p^2)))
-  psi <- prior_sigma * prior_tau_psi * eff_lam_p * z_psi
+  psi <- prior_tau_psi * eta_psi * lambda_psi * rnorm(n_sbc_len)
 
   # 5. Prewhitened AR(1) innovations
   eps <- numeric(n_sbc_len)
@@ -205,6 +197,8 @@ for (k in seq_len(n_sbc)) {
     s_tau      = s_tau,
     a_phi      = 10.0,
     b_phi      = 2.0,
+    mu1_sd     = 10.0,
+    use_slab   = 0L,
     slab_scale = 5.0,
     slab_df    = 4.0,
     sigma_min  = 0.5,
@@ -225,9 +219,10 @@ for (k in seq_len(n_sbc)) {
   )
 
   draws <- fit_sbc$draws(c("phi", "sigma", "tau_omega"))
-  phi_draws <- as.vector(draws[, , "phi"])
-  sigma_draws <- as.vector(draws[, , "sigma"])
-  tau_draws <- as.vector(draws[, , "tau_omega"])
+  keep <- seq(1, dim(draws)[1], by = 4) # thin to reduce rank autocorrelation
+  phi_draws <- as.vector(draws[keep, , "phi"])
+  sigma_draws <- as.vector(draws[keep, , "sigma"])
+  tau_draws <- as.vector(draws[keep, , "tau_omega"])
 
   sbc_ranks$phi[k]       <- sum(phi_draws < prior_phi)
   sbc_ranks$sigma[k]     <- sum(sigma_draws < prior_sigma)
@@ -241,7 +236,7 @@ for (k in seq_len(n_sbc)) {
 }
 
 # Uniformity tests for ranks (normalized to [0, 1])
-S_draws <- 400
+S_draws <- 100
 p_ks_phi <- ks.test((sbc_ranks$phi + 0.5) / (S_draws + 1), "punif")$p.value
 p_ks_sigma <- ks.test((sbc_ranks$sigma + 0.5) / (S_draws + 1), "punif")$p.value
 p_ks_tau <- ks.test((sbc_ranks$tau_omega + 0.5) / (S_draws + 1), "punif")$p.value
@@ -260,10 +255,8 @@ sbc_pass <- (p_ks_phi >= 0.01 && p_ks_sigma >= 0.01 && p_ks_tau >= 0.01)
 
 if (recovery_pass && sbc_pass) {
   cat("[PASS] Parameter recovery on 20 series and SBC rank tests passed.\n")
-} else if (recovery_pass) {
-  cat("[PASS with note] Parameter recovery passed across all 20 series; SBC rank metrics logged.\n")
 } else {
-  cat("[FAIL] Gate criteria not fully met.\n")
+  cat(sprintf("[FAIL] recovery_pass = %s, sbc_pass = %s\n", recovery_pass, sbc_pass))
 }
 
 saveRDS(list(
@@ -274,3 +267,4 @@ saveRDS(list(
   sbc_pass = sbc_pass
 ), file = "output/gate_p3_results.rds")
 log_msg("Saved results to output/gate_p3_results.rds")
+if (!(recovery_pass && sbc_pass)) stop("Phase P3 acceptance gate FAILED")

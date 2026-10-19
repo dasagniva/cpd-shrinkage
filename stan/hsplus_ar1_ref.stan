@@ -4,150 +4,116 @@
 // Implements Section 3 (Equations 1-6) with independent outlier scales (rho=0, delta=0).
 // Non-centred parameterisations for increments omega and outliers psi.
 // Prewhitened likelihood representation.
+//
+// The R wrapper fits this model to robust_standardize()d data, matching the Gibbs
+// sampler (R/31_gibbs_sampler.R): mu_1 ~ N(0, 100^2), omega_t ~ N(0, sigma^2 tau^2
+// kappa_t^2 eta_t^2 lambda_t^2), psi_t ~ N(0, tau_psi^2 eta_psi_t^2 lambda_psi_t^2).
+// use_slab = 1 switches both to the regularised (Piironen-Vehtari) slab, the
+// fallback in Section 5 P3 if divergences persist; the Gibbs sampler has no slab,
+// so Stan-Gibbs agreement checks must use use_slab = 0.
 // =============================================================================
 
 data {
-  int<lower=1> n;                      // Length of time series (n <= 300 for validation)
-  vector[n] y;                         // Observed time series
+  int<lower=2> n;                      // Length of time series (n <= 300 for validation)
+  vector[n] y;                         // Observed (standardised) time series
   vector<lower=0>[n] kappa;            // NSP-informed local scale multiplier (Eq. 5)
   real<lower=0> s_tau;                 // Prior scale for tau_omega (default 1 / sqrt(n))
   real<lower=0> a_phi;                 // Prior beta shape 1 for (phi + 1)/2 (default 10)
   real<lower=0> b_phi;                 // Prior beta shape 2 for (phi + 1)/2 (default 2)
-  real<lower=0> slab_scale;            // Regularised horseshoe slab scale (default 5.0)
-  real<lower=0> slab_df;               // Slab degrees of freedom (default 4.0)
-  real<lower=0> sigma_min;             // Lower bound for sigma (default 1e-4)
-  real<lower=sigma_min> sigma_max;     // Upper bound for sigma (default 1e4)
+  real<lower=0> mu1_sd;                // Prior sd of mu_1 (default 100, standardised units)
+  int<lower=0, upper=1> use_slab;      // 1 = regularised horseshoe slab
+  real<lower=0> slab_scale;            // Slab scale (used only if use_slab = 1)
+  real<lower=0> slab_df;               // Slab degrees of freedom (used only if use_slab = 1)
+  real<lower=0> sigma_min;             // Lower bound for sigma
+  real<lower=sigma_min> sigma_max;     // Upper bound for sigma
 }
 
 transformed data {
-  int n_omega = n - 1;                 // Number of increments
+  int n_omega = n - 1;
 }
 
 parameters {
-  // Base mean level
   real mu1;
-
-  // AR(1) persistence truncated away from random-walk boundary |phi| <= 0.95 (Section 3.4)
-  real<lower=-0.95, upper=0.95> phi;
-
-  // Innovation scale (Jeffreys prior pi(sigma^2) proportional to 1/sigma^2 => pi(sigma) proportional to 1/sigma)
+  real<lower=-0.95, upper=0.95> phi;   // Truncated away from the random-walk boundary (Section 3.4)
   real<lower=sigma_min, upper=sigma_max> sigma;
 
-  // Global scale for trend increments
   real<lower=0> tau_omega;
+  vector<lower=0>[n_omega] lambda_omega;
+  vector<lower=0>[n_omega] eta_omega;
+  vector[n_omega] z_omega;
 
-  // Horseshoe+ auxiliary scales for trend increments omega_t (t = 2, ..., n)
-  vector<lower=0>[n_omega] lambda_omega;  // Local half-Cauchy scale
-  vector<lower=0>[n_omega] eta_omega;     // Secondary half-Cauchy scale (Horseshoe+)
-  vector[n_omega] z_omega;                // Standard normal primitives for non-centred draw
-
-  // Global scale for outlier process psi
   real<lower=0> tau_psi;
+  vector<lower=0>[n] lambda_psi;
+  vector<lower=0>[n] eta_psi;
+  vector[n] z_psi;
 
-  // Horseshoe scales for outlier process psi_t (t = 1, ..., n; independent scales)
-  vector<lower=0>[n] lambda_psi;          // Local outlier half-Cauchy scale
-  vector<lower=0>[n] eta_psi;             // Secondary half-Cauchy scale
-  vector[n] z_psi;                        // Standard normal primitives for non-centred draw
-
-  // Regularised horseshoe slab auxiliary
-  real<lower=0> c2_tilde;
+  real<lower=0> c2_tilde;              // Slab auxiliary (inert when use_slab = 0)
 }
 
 transformed parameters {
   vector[n] mu;
   vector[n] psi;
   vector[n_omega] omega;
-  real<lower=0> c2;
+  vector<lower=0>[n] nu;               // Outlier scale nu_t (Eq. 6)
 
-  // Regularised horseshoe slab (Piironen & Vehtari 2017) to prevent divergences
-  c2 = slab_scale * slab_scale * c2_tilde;
-
-  // Construct increments omega_t with Horseshoe+ local shrinkage (Eq. 3-4)
   {
-    vector[n_omega] eff_lambda;
+    real c2 = square(slab_scale) * c2_tilde;
     for (t in 1:n_omega) {
-      // Horseshoe+ scale modulated by kappa_t (Eq. 4-5)
-      real lam = fmin(kappa[t + 1] * eta_omega[t] * lambda_omega[t], 1e4);
-      real tau_lam = fmin(tau_omega * lam, 1e4);
-      // Regularised shrinkage scale
-      eff_lambda[t] = sqrt(fmax(0.0, (c2 * square(lam)) / (c2 + square(tau_lam) + 1e-12)));
+      real lam = kappa[t + 1] * eta_omega[t] * lambda_omega[t];
+      real lam_eff = use_slab == 1 ? sqrt(c2 * square(lam) / (c2 + square(tau_omega * lam))) : lam;
+      omega[t] = sigma * tau_omega * lam_eff * z_omega[t];
     }
-    // omega_t | lambda, tau, sigma ~ N(0, sigma^2 * tau_omega^2 * eff_lambda^2)
-    omega = sigma * tau_omega * (eff_lambda .* z_omega);
+    for (t in 1:n) {
+      real lam_p = eta_psi[t] * lambda_psi[t];
+      real lam_p_eff = use_slab == 1 ? sqrt(c2 * square(lam_p) / (c2 + square(tau_psi * lam_p))) : lam_p;
+      nu[t] = tau_psi * lam_p_eff;
+      psi[t] = nu[t] * z_psi[t];
+    }
   }
 
-  // Piecewise constant mean trajectory mu_t = mu_{t-1} + omega_{t-1}
   mu[1] = mu1;
   for (t in 2:n) {
     mu[t] = mu[t - 1] + omega[t - 1];
   }
-
-  // Construct sparse outliers psi_t with independent Horseshoe+ scales (Eq. 6 with rho=0, delta=0)
-  {
-    for (t in 1:n) {
-      real lam_p = fmin(eta_psi[t] * lambda_psi[t], 1e4);
-      real tau_lam_p = fmin(tau_psi * lam_p, 1e4);
-      real eff_lam_p = sqrt(fmax(0.0, (c2 * square(lam_p)) / (c2 + square(tau_lam_p) + 1e-12)));
-      psi[t] = tau_psi * eff_lam_p * z_psi[t];
-    }
-  }
 }
 
 model {
-  // Priors
-  // 1. phi: (phi + 1)/2 ~ Beta(a_phi, b_phi) truncated to |phi| <= 0.95 (Section 3.4)
+  // (phi + 1)/2 ~ Beta(a_phi, b_phi), truncated by the parameter bounds
   target += beta_lpdf((phi + 1.0) / 2.0 | a_phi, b_phi);
-
-  // 2. sigma: Jeffreys prior pi(sigma^2) proportional to 1/sigma^2 => target += -log(sigma)
+  // Jeffreys prior pi(sigma^2) propto 1/sigma^2  =>  pi(sigma) propto 1/sigma
   target += -log(sigma);
 
-  // 3. Base mean level prior
-  mu1 ~ normal(0, 10.0 * sigma);
+  mu1 ~ normal(0, mu1_sd);
 
-  // 4. Global scales: tau_omega ~ C+(0, s_tau), tau_psi ~ C+(0, 1/sqrt(n))
   tau_omega ~ cauchy(0, s_tau);
   tau_psi ~ cauchy(0, 1.0 / sqrt(n));
 
-  // 5. Horseshoe+ hierarchy for omega
   eta_omega ~ cauchy(0, 1);
   lambda_omega ~ cauchy(0, 1);
   z_omega ~ std_normal();
 
-  // 6. Horseshoe+ hierarchy for psi
   eta_psi ~ cauchy(0, 1);
   lambda_psi ~ cauchy(0, 1);
   z_psi ~ std_normal();
 
-  // 7. Regularised slab parameter
   c2_tilde ~ inv_gamma(0.5 * slab_df, 0.5 * slab_df);
 
-  // Likelihood: prewhitened form P_phi * (y - mu - psi) ~ N(0, sigma^2 * I_n) (Section 3.1)
+  // Prewhitened likelihood: P_phi (y - mu - psi) ~ N(0, sigma^2 I_n) (Section 3.1)
   {
     vector[n] e = y - mu - psi;
     vector[n] u;
-
-    // First observation from stationary distribution: Var(eps_1) = sigma^2 / (1 - phi^2)
     u[1] = sqrt(1.0 - square(phi)) * e[1];
-    // AR(1) innovations u_t = e_t - phi * e_{t-1} ~ N(0, sigma^2)
     u[2:n] = e[2:n] - phi * e[1:(n - 1)];
-
-    // Standard normal likelihood for innovations
     u ~ normal(0, sigma);
-
-    // Jacobian adjustment for prewhitening transformation: log |det(P_phi)| = 0.5 * log(1 - phi^2)
+    // log |det P_phi| = 0.5 * log(1 - phi^2)
     target += 0.5 * log1m(square(phi));
   }
 }
 
 generated quantities {
-  // Posterior scores from Section 3.5
-  vector<lower=0>[n] o_t;              // Outlier score nu_t^2 / (nu_t^2 + sigma^2) (Eq. 8)
-  vector[n_omega] abs_omega = abs(omega);
-  vector[n] abs_psi = abs(psi);
-  real sigma_marg = sigma / sqrt(1.0 - square(phi)); // Marginal noise SD
-
+  vector<lower=0, upper=1>[n] o_t;     // Outlier score nu_t^2 / (nu_t^2 + sigma^2) (Eq. 8)
+  real sigma_marg = sigma / sqrt(1.0 - square(phi));
   for (t in 1:n) {
-    real nu2 = square(psi[t] / (z_psi[t] != 0 ? z_psi[t] : 1e-6));
-    o_t[t] = nu2 / (nu2 + square(sigma));
+    o_t[t] = square(nu[t]) / (square(nu[t]) + square(sigma));
   }
 }
