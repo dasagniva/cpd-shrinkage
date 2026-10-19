@@ -5,6 +5,9 @@
 
 source("../../R/00_utils.R")
 source("../../R/10_dgp.R")
+source("../../R/40_scoring.R")
+source("../../R/41_bfdr.R")
+source("../../R/42_classify.R")
 source("../../R/30_stan_reference.R")
 
 test_that("Stan reference model file exists and compiles", {

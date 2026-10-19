@@ -7,9 +7,15 @@
 if (file.exists("R/00_utils.R")) {
   source("R/00_utils.R")
   source("R/32_gibbs_updates.R")
+  source("R/40_scoring.R")
+  source("R/41_bfdr.R")
+  source("R/42_classify.R")
 } else if (file.exists("../../R/00_utils.R")) {
   source("../../R/00_utils.R")
   source("../../R/32_gibbs_updates.R")
+  source("../../R/40_scoring.R")
+  source("../../R/41_bfdr.R")
+  source("../../R/42_classify.R")
 }
 
 suppressPackageStartupMessages({
@@ -296,6 +302,9 @@ gibbs_sampler <- function(
     dynamic = FALSE,
     delta = 0.0,
     alpha_fdr = 0.05,
+    capa_collective = NULL,
+    L_max = NULL,
+    r = 0.3,
     seed = NULL
 ) {
   start_time <- proc.time()[3]
@@ -381,62 +390,30 @@ gibbs_sampler <- function(
   draws_obj <- as_draws_array(draws_arr)
   summ_diag <- summarize_draws(draws_obj)
 
-  # Bayesian FDR selection (Section 3.5)
-  fdr_select <- function(p_vec, alpha) {
-    k_cand <- integer(0)
-    if (length(p_vec) == 0) return(k_cand)
-    ord <- order(p_vec, decreasing = TRUE)
-    cum_fdr <- cumsum(1.0 - p_vec[ord]) / seq_along(ord)
-    valid_k <- which(cum_fdr <= alpha)
-    if (length(valid_k) > 0) {
-      max_k <- max(valid_k)
-      k_cand <- ord[seq_len(max_k)]
-    }
-    sort(k_cand)
-  }
-
-  flagged_cp <- fdr_select(p_omega, alpha_fdr)
-  cp_locs <- if (length(flagged_cp) > 0) flagged_cp + 1L else integer(0)
-
-  flagged_point <- fdr_select(p_psi, alpha_fdr)
-
-  # Four-class labelling rule (Section 3.6)
-  class_vec <- rep("nominal", n)
-  if (length(cp_locs) > 0) {
-    class_vec[cp_locs] <- "shift"
-  }
-  if (length(flagged_point) > 0) {
-    pt_only <- setdiff(flagged_point, cp_locs)
-    if (length(pt_only) > 0) {
-      class_vec[pt_only] <- "point"
-    }
-  }
-
-  scores_df <- data.frame(
-    t     = seq_len(n),
-    s_cp  = c(0.0, p_omega),
-    s_out = o_t_mean
+  diag_list <- list(
+    summary   = summ_diag,
+    max_rhat  = max(summ_diag$rhat, na.rm = TRUE),
+    min_ess   = min(summ_diag$ess_bulk, na.rm = TRUE),
+    phi_hat   = mean(mat_phi),
+    sigma_hat = mean(mat_sigma),
+    mu_mean   = mu_mean,
+    mu_sd     = mu_sd,
+    psi_mean  = psi_mean,
+    draws     = draws_obj
   )
 
-  new_cpd_fit(
-    method      = "proposed",
-    cp          = cp_locs,
-    cp_int      = NULL,
-    point       = flagged_point,
-    collective  = NULL,
-    class       = factor(class_vec, levels = CPD_CLASS_LEVELS),
-    scores      = scores_df,
-    runtime_sec = runtime_sec,
-    diag        = list(
-      summary   = summ_diag,
-      max_rhat  = max(summ_diag$rhat, na.rm = TRUE),
-      min_ess   = min(summ_diag$ess_bulk, na.rm = TRUE),
-      phi_hat   = mean(mat_phi),
-      sigma_hat = mean(mat_sigma),
-      mu_mean   = mu_mean,
-      mu_sd     = mu_sd,
-      psi_mean  = psi_mean,
-      draws     = draws_obj
-    )
+  classify_and_build_fit(
+    y               = y,
+    mu_hat          = mu_mean,
+    s_out           = o_t_mean,
+    p_omega         = p_omega,
+    p_psi           = p_psi,
+    alpha_fdr       = alpha_fdr,
+    capa_collective = capa_collective,
+    method          = "proposed",
+    runtime_sec     = runtime_sec,
+    diag            = diag_list,
+    L_max           = L_max,
+    r               = r
   )
 }

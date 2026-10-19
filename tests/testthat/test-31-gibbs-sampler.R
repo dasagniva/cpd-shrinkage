@@ -5,6 +5,9 @@
 
 source("../../R/00_utils.R")
 source("../../R/10_dgp.R")
+source("../../R/40_scoring.R")
+source("../../R/41_bfdr.R")
+source("../../R/42_classify.R")
 source("../../R/32_gibbs_updates.R")
 source("../../R/31_gibbs_sampler.R")
 
