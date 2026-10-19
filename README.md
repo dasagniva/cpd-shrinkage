@@ -28,12 +28,10 @@ This package implements the **Significance-Guided Global–Local Shrinkage Frame
 ## 2. Mathematical Formulation
 
 The generative model for $t = 1, \dots, n$ is:
-$$\begin{aligned}
-y_t &= \mu_t + \psi_t + \varepsilon_t, \\
-\varepsilon_t &= \phi \varepsilon_{t-1} + u_t, \quad u_t \stackrel{\text{iid}}{\sim} \mathcal{N}(0, \sigma^2), \quad |\phi| < 1, \\
-\omega_t &= \mu_{t+1} - \mu_t \mid \tau_\omega, \lambda_t, \eta_t, \sigma \sim \mathcal{N}(0, \sigma^2 \tau_\omega^2 \kappa_t^2 \lambda_t^2 \eta_t^2), \\
-\psi_t \mid \nu_t &\sim \mathcal{N}(0, \nu_t^2), \quad \log \nu_t^2 = m_h + h_t + \delta a_t,
-\end{aligned}$$
+  $$y_t = \mu_t + \psi_t + \varepsilon_t,$$
+  $$\varepsilon_t = \phi \varepsilon_{t-1} + u_t, \quad u_t \stackrel{\text{iid}}{\sim} \mathcal{N}(0, \sigma^2), \quad |\phi| < 1,$$
+  $$\omega_t = \mu_{t+1} - \mu_t \mid \tau_\omega, \lambda_t, \eta_t, \sigma \sim \mathcal{N}(0, \sigma^2 \tau_\omega^2 \kappa_t^2 \lambda_t^2 \eta_t^2), $$
+  $$\psi_t \mid \nu_t \sim \mathcal{N}(0, \nu_t^2), \quad \log \nu_t^2 = m_h + h_t + \delta a_t,$$
 where $\kappa_t \ge 1$ inflates the local Horseshoe+ scale on candidate significance intervals $\mathcal{I}$, and $a_t \in \{0, 1\}$ provides dynamic offset guidance from robust prewhitened anomaly screening.
 
 ---
