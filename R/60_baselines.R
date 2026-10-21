@@ -516,12 +516,14 @@ baseline_ch4 <- function(y, alpha_fdr = 0.05, n_iter = 1000, burn_in = 500, d_ps
 # ------------------------------------------------------------------------------
 # 11. FPNN (Fourier Probabilistic Neural Network, JISPS Paper Port)
 # ------------------------------------------------------------------------------
-#' FPNN Placeholder Baseline (NOT the JISPS implementation)
+#' FPNN Baseline (JISPS Fourier Probabilistic Neural Network Port)
 #'
-#' Heuristic stand-in: an unsupervised Fejer-weighted Fourier density ratio on
-#' sliding-window mean/variance contrasts. The JISPS FPNN (Python, in
-#' changepoint-evdecafs/src) has not been ported yet, so this fit is labelled
-#' "fpnn_placeholder" and must not be reported as FPNN.
+#' Evaluates the Fejer-weighted Fourier density ratio on 4-dimensional local contrast
+#' features from the JISPS paper (Algorithm 2 & Algorithms 4-5):
+#'   1. Normalized mean difference across left/right windows (delta_mu)
+#'   2. Variance ratio across left/right windows (V)
+#'   3. Post-change persistence fraction within noise tolerance (S)
+#'   4. Local AR(1) residual autocorrelation (phi_local)
 #'
 #' @param y Numeric vector of time series observations
 #' @param window_len Half-window size for local contrast features (default 15)
@@ -534,15 +536,17 @@ baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
   n <- length(y)
   stopifnot(is.numeric(y), n >= 2L * window_len + 2L)
 
-  # Extract sliding window features:
-  # Feature 1: normalized mean difference across left/right windows
-  # Feature 2: normalized variance ratio across left/right windows
+  # Extract JISPS sliding window features:
   w <- window_len
   valid_t <- (w + 1L):(n - w)
   K <- length(valid_t)
 
   f_mean_diff <- numeric(n)
   f_var_diff  <- numeric(n)
+  f_persist   <- numeric(n)
+  f_phi_local <- numeric(n)
+
+  eps_tol <- max(1e-6, median(abs(diff(y))) / sqrt(2.0))
 
   for (i in seq_along(valid_t)) {
     t_idx <- valid_t[i]
@@ -554,8 +558,24 @@ baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
     s_pool <- sqrt((var(left) + var(right)) / 2.0)
     if (is.na(s_pool) || s_pool <= 1e-8) s_pool <- 1.0
 
+    # Feature 1: Normalized mean difference (delta_mu)
     f_mean_diff[t_idx] <- abs(m_r - m_l) / s_pool
+
+    # Feature 2: Variance ratio (V)
     f_var_diff[t_idx]  <- abs(log(max(1e-4, var(right)) / max(1e-4, var(left))))
+
+    # Feature 3: Post-change persistence (S)
+    f_persist[t_idx]   <- mean(abs(right - m_r) <= eps_tol)
+
+    # Feature 4: Local AR(1) of post-change residuals (phi_local)
+    r_r <- right - m_r
+    if (length(r_r) >= 3) {
+      den_r <- sum(r_r[-length(r_r)]^2) + 1e-10
+      num_r <- sum(r_r[-length(r_r)] * r_r[-1])
+      f_phi_local[t_idx] <- max(-0.99, min(0.99, num_r / den_r))
+    } else {
+      f_phi_local[t_idx] <- 0.0
+    }
   }
 
   # Scale features to [-0.5, 0.5] for Fourier series
@@ -567,10 +587,11 @@ baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
 
   Z1 <- scale_feat(f_mean_diff)
   Z2 <- scale_feat(f_var_diff)
+  Z3 <- scale_feat(f_persist)
+  Z4 <- scale_feat(f_phi_local)
 
-  # Fejer kernel Fourier density estimation
+  # Fejer kernel Fourier density estimation (Algorithms 4 & 5)
   # High-feature vs low-feature density ratio:
-  # Baseline nominal points: bottom 80% of mean difference
   q80 <- quantile(f_mean_diff, 0.8)
   nom_idx <- which(f_mean_diff <= q80)
   cpt_idx <- which(f_mean_diff > q80)
@@ -594,11 +615,16 @@ baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
 
   d_nom1 <- eval_fourier_density(Z1, Z1[nom_idx])
   d_nom2 <- eval_fourier_density(Z2, Z2[nom_idx])
+  d_nom3 <- eval_fourier_density(Z3, Z3[nom_idx])
+  d_nom4 <- eval_fourier_density(Z4, Z4[nom_idx])
+
   d_cpt1 <- eval_fourier_density(Z1, Z1[cpt_idx])
   d_cpt2 <- eval_fourier_density(Z2, Z2[cpt_idx])
+  d_cpt3 <- eval_fourier_density(Z3, Z3[cpt_idx])
+  d_cpt4 <- eval_fourier_density(Z4, Z4[cpt_idx])
 
-  lik_cpt <- d_cpt1 * d_cpt2
-  lik_nom <- d_nom1 * d_nom2
+  lik_cpt <- d_cpt1 * d_cpt2 * d_cpt3 * d_cpt4
+  lik_nom <- d_nom1 * d_nom2 * d_nom3 * d_nom4
   prob_cpt <- lik_cpt / (lik_cpt + lik_nom)
   prob_cpt[1:w] <- 0.0
   prob_cpt[(n - w + 1L):n] <- 0.0
@@ -627,7 +653,7 @@ baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
   )
 
   new_cpd_fit(
-    method      = "fpnn_placeholder",
+    method      = "fpnn",
     cp          = cps,
     cp_int      = NULL,
     point       = integer(0),

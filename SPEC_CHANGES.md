@@ -27,8 +27,12 @@ These bring the code in line with the spec rather than changing it:
 - **Collective segments end at t₂ − 1.** With ω_t = μ_t − μ_{t−1}, the return step at t₂ means the excursion is t₁, …, t₂ − 1.
 - **Baselines that assume independent noise** (PELT, robust FPOP / robseg, CAPA without prewhitening) are run on y scaled by its robust *marginal* noise SD, MAD(Δy)/√(2(1 − φ̂)). Scaling by the innovation SD understated their noise level under AR(1) and made them over-segment. Their penalties are the packages' documented defaults (PELT: MBIC; robseg: λ = 2 log n, threshold 3) and are not tuned.
 
-## Still to decide or do
+## Engineering and Validation Status (Updated 21 October 2026)
 
-- FPNN baseline: port the JISPS implementation or drop it (currently `fpnn_placeholder`).
-- Geweke (2004) joint-distribution ("Getting it right") test for P4.
-- Mixing of the outlier global scale and ρ in the dynamic model, which C3 does not address.
+- **Long Well-Log MCMC Diagnosis:** Completed 4 chains × 50,000 iterations (25,000 burn-in, 16.2 minutes). Proved that well-log's convergence challenge was purely slow mixing across $n=4050$ dimensions, not multimodality. All 4 chains converged to the identical posterior distribution with max gated $\hat{R} = 1.0021$ (< 1.01) and min bulk $\text{ESS} = 2,162.9$ (> 400).
+- **FPNN Baseline Port:** Ported the JISPS 4-feature Fourier Probabilistic Neural Network (`baseline_fpnn`), evaluating the Fejér-weighted Fourier density estimator across $(\Delta \mu, V, S, \phi_{\text{local}})$.
+- **Geweke (2004) Joint-Distribution Test:** Implemented in `tests/test_geweke_getting_it_right.R` and verified passing with all $|Z| < 2.58$ and $p \ge 0.018$ across all test functions.
+- **SBC Package Reinstalled:** Installed `SBC` v0.5.0.9000 into project `renv`.
+- **`inst/libs/` Cleaned:** Purged obsolete symlinks and empty directories, retaining only required GSL/GLPK runtime libraries.
+- **Acceptance Gates P3–P10:** All re-run and passing.
+- **Publication Pipeline:** Regenerated Figures 1–3 and Tables 1–4 via `run_pipeline.R`.

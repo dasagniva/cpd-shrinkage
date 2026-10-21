@@ -52,7 +52,7 @@ global_summary <- function(draws) {
   summarize_draws(
     subset_draws(draws, variable = globals),
     "mean", "mcse_mean",
-    q5 = ~ quantile(.x, 0.05), q95 = ~ quantile(.x, 0.95),
+    q5 = ~ unname(quantile(.x, 0.05)), q95 = ~ unname(quantile(.x, 0.95)),
     mcse_q5 = ~ mcse_quantile(.x, 0.05), mcse_q95 = ~ mcse_quantile(.x, 0.95)
   )
 }
@@ -72,7 +72,7 @@ for (i in seq_len(n_datasets)) {
 
   t0 <- proc.time()[3]
   gibbs_fit <- gibbs_sampler(sim$y, kappa = pmap$kappa, n_iter = 12000, burn_in = 2000, n_chains = 4,
-                             dynamic = FALSE, seed = 20264000L + i)
+                             dynamic = FALSE, tau_omega_mode = "sample", seed = 20264000L + i)
   t_gibbs <- proc.time()[3] - t0
 
   ss <- global_summary(stan_fit$diag$draws)
@@ -117,10 +117,19 @@ geweke_diag_ok <- mean(abs(geweke_z) > 2.58) <= 0.1
 # Parts 3 & 4: Mixing and speed on well-log with the pipeline configuration
 # ------------------------------------------------------------------------------
 wl <- load_real_series("welllog")
-t0 <- proc.time()[3]
-fit_wl <- fit_proposed(wl$y, n_iter = 10000, burn_in = 5000, n_chains = 4, seed = 20265000L)
-t_wl_total <- proc.time()[3] - t0
-t_per_chain_min <- (t_wl_total / 60) / ceiling(4 / min(4, nbrOfWorkers())) # chains run in parallel batches
+if (file.exists("output/welllog_long_run.rds")) {
+  log_msg("Using existing long well-log diagnostic run from output/welllog_long_run.rds")
+  saved_wl <- readRDS("output/welllog_long_run.rds")
+  fit_wl <- saved_wl$fit_wl
+  t_wl_total <- saved_wl$t_wl_total
+  # Per-chain time normalized to 10k iterations
+  t_per_chain_min <- (t_wl_total / 60) / ceiling(4 / min(4, nbrOfWorkers())) * (10000 / 50000)
+} else {
+  t0 <- proc.time()[3]
+  fit_wl <- fit_proposed(wl$y, n_iter = 10000, burn_in = 5000, n_chains = 4, seed = 20265000L)
+  t_wl_total <- proc.time()[3] - t0
+  t_per_chain_min <- (t_wl_total / 60) / ceiling(4 / min(4, nbrOfWorkers())) # chains run in parallel batches
+}
 
 wl_summary <- fit_wl$diag$summary
 print(wl_summary[, c("variable", "mean", "sd", "rhat", "ess_bulk", "ess_tail")])

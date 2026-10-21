@@ -84,8 +84,8 @@ simulate_series <- function(
   mu <- rep(0.0, n)
 
   if (k0 > 0) {
-    # Place change points at fixed fractions as in thesis DGP
-    fractions <- seq(0.12, 0.88, length.out = k0)
+    # Place change points: centered at 0.5 for k0 = 1, or spaced evenly across [0.12, 0.88]
+    fractions <- if (k0 == 1L) 0.50 else seq(0.12, 0.88, length.out = k0)
     raw_cps <- round(fractions * n)
     raw_cps <- pmax(5L, pmin(n - 5L, raw_cps))
     cp_locs <- sort(unique(raw_cps))

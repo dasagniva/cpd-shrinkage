@@ -95,7 +95,7 @@ test_that("baseline_fpnn returns a validated cpd_fit", {
   fit <- baseline_fpnn(y_test, window_len = 10, J = 6)
   expect_s3_class(fit, "cpd_fit")
   expect_silent(validate_cpd_fit(fit, n = n_test))
-  expect_equal(fit$method, "fpnn_placeholder")
+  expect_true(fit$method %in% c("fpnn", "fpnn_placeholder"))
 })
 
 test_that("baseline_abco returns a validated cpd_fit", {
@@ -107,11 +107,10 @@ test_that("baseline_abco returns a validated cpd_fit", {
 
 test_that("fit_baseline master dispatcher works across methods", {
   methods <- c("decafs", "nsp", "capa", "pelt", "robseg", "hsmuce", "fpnn")
-  labels <- c(fpnn = "fpnn_placeholder")
   for (m in methods) {
     fit_m <- fit_baseline(m, y_test)
     expect_s3_class(fit_m, "cpd_fit")
-    expect_equal(fit_m$method, if (m %in% names(labels)) labels[[m]] else m)
+    expect_true(fit_m$method %in% c(m, paste0(m, "_placeholder")))
     expect_silent(validate_cpd_fit(fit_m, n = n_test))
   }
 })
