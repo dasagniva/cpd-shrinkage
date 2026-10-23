@@ -10,7 +10,6 @@ source("R/10_dgp.R")
 source("R/20_frontend_nsp.R")
 source("R/21_frontend_capa.R")
 source("R/22_prior_map.R")
-source("R/30_stan_reference.R")
 source("R/31_gibbs_sampler.R")
 source("R/32_gibbs_updates.R")
 source("R/40_scoring.R")
@@ -32,10 +31,12 @@ wl <- load_real_series("welllog")
 cat(sprintf("Loaded well-log series: n = %d, range = [%.1f, %.1f]\n", wl$n, min(wl$y), max(wl$y)))
 
 t0 <- proc.time()[3]
+N_ITER <- 50000
+BURN_IN <- 25000
 fit_wl <- fit_proposed(
   wl$y,
-  n_iter   = 50000,
-  burn_in  = 25000,
+  n_iter   = N_ITER,
+  burn_in  = BURN_IN,
   n_chains = 4,
   seed     = 20265000L
 )
@@ -100,6 +101,8 @@ out_res <- list(
   chain_stats     = all_chain_stats,
   t_wl_total      = t_wl_total,
   t_per_chain_min = t_per_chain_min,
+  n_iter          = N_ITER,
+  burn_in         = BURN_IN,
   max_rhat_gated  = max_rhat_gated,
   min_ess_gated   = min_ess_gated,
   timestamp       = Sys.time()

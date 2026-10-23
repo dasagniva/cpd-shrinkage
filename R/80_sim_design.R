@@ -150,7 +150,19 @@ run_method_on_replicate <- function(sim, method, m_args = list()) {
     ))
   }
 
-  evaluate_all_metrics(truth, fit)
+  res <- evaluate_all_metrics(truth, fit)
+  # MCMC diagnostics of the proposed method (gated quantities as in gate P4, change C8)
+  sm <- fit$diag$summary
+  gated <- if (!is.null(sm)) sm[sm$variable %in% c("phi", "sigma", "n_shift_windows", "n_outliers"), ] else NULL
+  res$fit_info <- list(
+    max_rhat_gated = if (!is.null(gated) && nrow(gated) > 0) max(gated$rhat, na.rm = TRUE) else NA_real_,
+    min_ess_gated  = if (!is.null(gated) && nrow(gated) > 0) min(gated$ess_bulk, na.rm = TRUE) else NA_real_,
+    max_rhat_all   = if (!is.null(fit$diag$max_rhat)) fit$diag$max_rhat else NA_real_,
+    phi_hat        = if (!is.null(fit$diag$phi_hat)) fit$diag$phi_hat else NA_real_,
+    n_cp           = length(fit$cp),
+    n_point        = length(fit$point)
+  )
+  res
 }
 
 #' Run Pilot Simulation Across Scenario Cells
@@ -251,4 +263,60 @@ run_pilot_simulation <- function(
     timing_summary = timing_summary,
     grid           = grid
   )
+}
+
+#' Collect the Full Simulation Study (tests/run_p8_full.R output)
+#'
+#' Reads one RDS per (cell, replicate) from `dir`, renames the main metrics to the pilot's
+#' column names (cp_f1, pt_f1, ...) and reports the expected vs. completed replicates and
+#' the failed fits per cell and method.
+#'
+#' @param dir Directory written by run_p8_full.R
+#' @param r_mcmc,r_fast Planned replicates for MCMC and other methods
+#' @param mcmc_methods Methods run with `r_mcmc` replicates
+#' @return list(data, completeness)
+#' @export
+collect_p8_full <- function(dir = "output/p8_full", r_mcmc = 100L, r_fast = 200L,
+                            mcmc_methods = c("proposed", "abco", "bcp", "ch4")) {
+  files <- list.files(dir, pattern = "__rep[0-9]+\\.rds$", full.names = TRUE)
+  stopifnot(length(files) > 0)
+  parts <- lapply(files, readRDS)
+  cols <- unique(unlist(lapply(parts, names)))
+  df <- do.call(rbind, lapply(parts, function(d) {
+    d[setdiff(cols, names(d))] <- NA
+    d[cols]
+  }))
+  rename <- c(cp.f1 = "cp_f1", cp.precision = "cp_prec", cp.recall = "cp_rec", cp.covering = "cp_covering",
+              cp.hausdorff = "cp_hausdorff", cp.count_error = "cp_count_error", point.f1 = "pt_f1",
+              point.realised_fdr = "pt_fdr", point.pr_auc = "pt_prauc", collective.f1 = "coll_f1",
+              four_class.macro_f1 = "macro_f1", wall_sec = "runtime_sec")
+  hit <- intersect(names(rename), names(df))
+  names(df)[match(hit, names(df))] <- rename[hit]
+
+  grid <- create_simulation_grid()
+  methods <- unique(df$method)
+  expected <- expand.grid(cell_id = grid$cell_id, method = methods, stringsAsFactors = FALSE)
+  expected$planned <- ifelse(expected$method %in% mcmc_methods, r_mcmc, r_fast)
+  done <- aggregate(cbind(completed = 1, failed = as.numeric(failed)) ~ cell_id + method, df, sum)
+  comp <- merge(expected, done, all.x = TRUE)
+  comp$completed[is.na(comp$completed)] <- 0
+  comp$failed[is.na(comp$failed)] <- 0
+  comp$complete <- comp$completed >= comp$planned
+  list(data = df, completeness = comp)
+}
+
+#' Mean and Monte Carlo SE of a Metric by Cell and Method
+#'
+#' Failed fits (NA metric) are excluded and counted in `n_na`.
+#'
+#' @export
+summarise_p8_metric <- function(df, metric) {
+  sp <- split(df[[metric]], list(df$cell_id, df$method), drop = TRUE, sep = "||")
+  key <- do.call(rbind, strsplit(names(sp), "||", fixed = TRUE))
+  data.frame(cell_id = key[, 1], method = key[, 2], metric = metric,
+             mean = vapply(sp, function(x) mean(x, na.rm = TRUE), numeric(1)),
+             se = vapply(sp, function(x) stats::sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x))), numeric(1)),
+             n = vapply(sp, function(x) sum(!is.na(x)), numeric(1)),
+             n_na = vapply(sp, function(x) sum(is.na(x)), numeric(1)),
+             row.names = NULL, stringsAsFactors = FALSE)
 }

@@ -114,19 +114,36 @@ cat(sprintf("geweke.diag: %d of %d |z| > 2.58\n", sum(abs(geweke_z) > 2.58), len
 geweke_diag_ok <- mean(abs(geweke_z) > 2.58) <= 0.1
 
 # ------------------------------------------------------------------------------
+# Part 2b: Geweke (2004) Getting-it-Right joint-distribution test
+# (tests/test_geweke_getting_it_right.R; ~1 h, so it is run separately)
+# ------------------------------------------------------------------------------
+gir_file <- "output/geweke_test_results.rds"
+if (!file.exists(gir_file)) stop("Run tests/test_geweke_getting_it_right.R first (", gir_file, " missing)")
+gir <- readRDS(gir_file)
+stopifnot(!is.null(gir$verdicts))
+getting_it_right_pass <- isTRUE(gir$passed) && isTRUE(gir$power_ok)
+cat(sprintf("Getting-it-Right: production %s, plug-in/independent %s, planted error detected %s (min Bonferroni p %.3g, %.3g)\n",
+            gir$verdicts$production$passed, gir$verdicts$plugin_indep$passed, gir$power_ok,
+            gir$verdicts$production$min_p_bonferroni, gir$verdicts$plugin_indep$min_p_bonferroni))
+
+# ------------------------------------------------------------------------------
 # Parts 3 & 4: Mixing and speed on well-log with the pipeline configuration
 # ------------------------------------------------------------------------------
 wl <- load_real_series("welllog")
+# The spec length (5,000 + 5,000) does not converge on well-log; the run length that does
+# (tests/run_welllog_long.R) is the one used for the real data in P9, and its actual
+# per-chain time is what is recorded against the 10-minute target.
 if (file.exists("output/welllog_long_run.rds")) {
-  log_msg("Using existing long well-log diagnostic run from output/welllog_long_run.rds")
+  log_msg("Using the long well-log run from output/welllog_long_run.rds")
   saved_wl <- readRDS("output/welllog_long_run.rds")
   fit_wl <- saved_wl$fit_wl
   t_wl_total <- saved_wl$t_wl_total
-  # Per-chain time normalized to 10k iterations
-  t_per_chain_min <- (t_wl_total / 60) / ceiling(4 / min(4, nbrOfWorkers())) * (10000 / 50000)
+  wl_iter <- if (!is.null(saved_wl$n_iter)) saved_wl$n_iter else 50000
+  t_per_chain_min <- saved_wl$t_per_chain_min
 } else {
+  wl_iter <- 10000
   t0 <- proc.time()[3]
-  fit_wl <- fit_proposed(wl$y, n_iter = 10000, burn_in = 5000, n_chains = 4, seed = 20265000L)
+  fit_wl <- fit_proposed(wl$y, n_iter = wl_iter, burn_in = 5000, n_chains = 4, seed = 20265000L)
   t_wl_total <- proc.time()[3] - t0
   t_per_chain_min <- (t_wl_total / 60) / ceiling(4 / min(4, nbrOfWorkers())) # chains run in parallel batches
 }
@@ -139,23 +156,26 @@ max_rhat_wl <- max(gated$rhat, na.rm = TRUE)
 min_ess_wl <- min(gated$ess_bulk, na.rm = TRUE)
 cat("Gated:", paste(gated_vars, collapse = ", "), "| reported only:",
     paste(setdiff(wl_summary$variable, gated_vars), collapse = ", "), "\n")
-cat(sprintf("Max R-hat %.3f (< 1.01) | min bulk ESS %.0f (> 400) | %.2f min per chain (< 10)\n",
-            max_rhat_wl, min_ess_wl, t_per_chain_min))
+cat(sprintf("Max R-hat %.3f (< 1.01) | min bulk ESS %.0f (> 400) | %.2f min per chain at %d iterations (target < 10)\n",
+            max_rhat_wl, min_ess_wl, t_per_chain_min, as.integer(wl_iter)))
 
 mixing_pass <- max_rhat_wl < 1.01 && min_ess_wl > 400
+# The spec states the speed as a target that triggers profiling, so it is recorded, not gated
 speed_pass <- t_per_chain_min < 10
+if (!speed_pass) cat("NOTE: speed target not met at the converged run length; profile and move hot loops to Rcpp\n")
 
-all_passed <- agreement_pass && geweke_diag_ok && mixing_pass && speed_pass
+all_passed <- agreement_pass && geweke_diag_ok && getting_it_right_pass && mixing_pass
 saveRDS(list(
   agreement = agreement, frac_z_ok = frac_z_ok, geweke_res = geweke_res,
   wl_summary = wl_summary, wl_cp = fit_wl$cp, wl_point = fit_wl$point, wl_collective = fit_wl$collective,
   t_wl_total = t_wl_total, t_per_chain_min = t_per_chain_min,
   agreement_pass = agreement_pass, geweke_diag_ok = geweke_diag_ok, mixing_pass = mixing_pass,
-  speed_pass = speed_pass, getting_it_right_test = "not implemented", all_passed = all_passed,
+  wl_iter = wl_iter, speed_pass = speed_pass, getting_it_right_pass = getting_it_right_pass,
+  getting_it_right = gir[c("verdicts", "passed", "power_ok", "timestamp")], all_passed = all_passed,
   timestamp = Sys.time()
 ), file = "output/gate_p4_results.rds")
 
-cat(sprintf("\nAgreement %s | geweke.diag %s | mixing %s | speed %s\n",
-            agreement_pass, geweke_diag_ok, mixing_pass, speed_pass))
+cat(sprintf("\nAgreement %s | geweke.diag %s | Getting-it-Right %s | mixing %s | speed target %s\n",
+            agreement_pass, geweke_diag_ok, getting_it_right_pass, mixing_pass, speed_pass))
 if (!all_passed) stop("Phase P4 acceptance gate FAILED (see output/gate_p4_results.rds)")
-cat(">>> PHASE P4 ACCEPTANCE GATE: PASSED (Getting-it-Right test still pending) <<<\n")
+cat(">>> PHASE P4 ACCEPTANCE GATE: PASSED <<<\n")

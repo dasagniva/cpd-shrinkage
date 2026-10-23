@@ -33,6 +33,12 @@ if (file.exists(local_gsl) && file.exists(local_cblas)) {
   }, error = function(e) NULL)
 }
 
+# O(n) banded / tridiagonal kernels (src/gibbs_fast.cpp)
+if (!exists("mu_psi_factor_cpp", mode = "function")) {
+  Rcpp::sourceCpp(file.path(proj_root, "src", "gibbs_fast.cpp"), env = globalenv(),
+                  cacheDir = file.path(proj_root, ".rcpp_cache"))
+}
+
 #' Prior variance of mu_1 on the standardised scale (sd = 100 robust noise units)
 MU1_PRIOR_VAR <- 1e4
 
@@ -110,16 +116,26 @@ build_mu_psi_system <- function(y, phi, sigma, v_omega, nu2, banded_struct) {
 
 #' Factorise the (mu, psi) conditional and evaluate the scale-dependent marginal likelihood
 #'
-#' Computes the banded Cholesky factor R of Q (reusing the cached symbolic
-#' factorisation) and, with (mu, psi) integrated out,
+#' Computes the banded Cholesky factor Q = L L' (bandwidth 3, in C++; Q has the entries
+#' of build_mu_psi_system) and, with (mu, psi) integrated out,
 #'   log p(y | v_omega, nu2, phi, sigma) = -1/2 sum log v_omega - 1/2 sum log nu2
 #'                                         - 1/2 log|Q| + 1/2 b' Q^{-1} b + const,
 #' where the constant does not depend on v_omega or nu2.
 #'
 #' @inheritParams update_mu_psi
-#' @return A list with factor `R`, `w = R^{-T} b` and `logml`
+#' @return A list with the lower band `L` (2n x 4, L[i, d] = L_{i, i-d}), `w = L^{-1} b`
+#'   and `logml`
 #' @export
-factor_mu_psi <- function(y, phi, sigma, v_omega, nu2, banded_struct) {
+factor_mu_psi <- function(y, phi, sigma, v_omega, nu2, banded_struct = NULL) {
+  mu_psi_factor_cpp(y, phi, sigma, v_omega, nu2, MU1_PRIOR_VAR)
+}
+
+#' Reference (spam) version of factor_mu_psi, kept for the unit tests
+#'
+#' @inheritParams update_mu_psi
+#' @return A list with spam factor `R`, `w = R^{-T} b` and `logml`
+#' @keywords internal
+factor_mu_psi_spam <- function(y, phi, sigma, v_omega, nu2, banded_struct) {
   sys <- build_mu_psi_system(y, phi, sigma, v_omega, nu2, banded_struct)
 
   cache <- banded_struct$cache
@@ -164,8 +180,8 @@ update_mu_psi <- function(y, phi, sigma, v_omega, nu2, banded_struct = NULL, fac
   }
   if (is.null(fac)) fac <- factor_mu_psi(y, phi, sigma, v_omega, nu2, banded_struct)
 
-  # x = Q^{-1} b + R^{-1} z, with pivoting handled by spam's solvers
-  x <- backsolve(fac$R, fac$w + rnorm(m))
+  # x = Q^{-1} b + L^{-T} z = L^{-T} (w + z)
+  x <- band_backsolve_cpp(fac$L, fac$w + rnorm(m))
   list(mu = x[seq(1, m, by = 2)], psi = x[seq(2, m, by = 2)])
 }
 
@@ -249,12 +265,14 @@ update_phi <- function(e, phi_curr, sigma, a_phi = 10.0, b_phi = 2.0, phi_max = 
 #' @param u Prewhitened innovations vector of length n
 #' @param omega Trend increments vector of length n - 1
 #' @param v_omega_tilde Prior variances of omega without the sigma^2 factor
+#' @param prior (shape, rate) of an inverse-gamma prior on sigma^2; the default c(0, 0) is
+#'   the Jeffreys prior. A proper prior is needed only for the Geweke (2004) test.
 #'
 #' @return Numeric scalar sigma2 > 0
 #' @export
-update_sigma2 <- function(u, omega, v_omega_tilde) {
-  shape <- (length(u) + length(omega)) / 2.0
-  rate <- (sum(u^2) + sum(omega^2 / v_omega_tilde)) / 2.0
+update_sigma2 <- function(u, omega, v_omega_tilde, prior = c(0, 0)) {
+  shape <- prior[1] + (length(u) + length(omega)) / 2.0
+  rate <- prior[2] + (sum(u^2) + sum(omega^2 / v_omega_tilde)) / 2.0
   1.0 / rgamma(1, shape = shape, rate = rate)
 }
 
@@ -441,7 +459,7 @@ rho_noncentred_update <- function(psi_tilde, ht, m_h, rho, prior = c(10, 2), n_s
   for (k in seq_len(n_steps)) {
     rho_prop <- rho + step * rnorm(1)
     if (abs(rho_prop) >= 1) next
-    h_prop <- as.numeric(stats::filter(e, rho_prop, method = "recursive"))
+    h_prop <- ar1_filter_cpp(e, rho_prop)
     ll_prop <- loglik(h_prop)
     if (log(runif(1)) < ll_prop - ll_curr + logprior(rho_prop) - logprior(rho)) {
       rho <- rho_prop
@@ -450,6 +468,60 @@ rho_noncentred_update <- function(psi_tilde, ht, m_h, rho, prior = c(10, 2), n_s
     }
   }
   list(rho = rho, ht = m_h + h_til)
+}
+
+#' dsp::sampleDSP for a single series with an O(n) log-volatility draw
+#'
+#' Line-for-line copy of dsp 1.7.0 sampleDSP (p = 1, loc = NULL) and its sampleLogVols,
+#' except that the tridiagonal Gaussian draw of the log-volatilities uses
+#' tridiag_sample_cpp instead of Matrix::bandSparse + Matrix::chol. The random-number
+#' calls are made in the same order, so it gives the same draws as dsp::sampleDSP up to
+#' floating-point rounding (checked in tests/testthat/test-32-gibbs-updates.R).
+#'
+#' @param omega n x 1 matrix of the (offset-adjusted) outliers
+#' @param evolParams dsp state list (ht, dhs_mean, dhs_phi, sigma_eta_t, sigma_eta_0, dhs_mean0)
+#' @param sigma_e,prior_dhs_phi,alphaPlusBeta As in dsp::sampleDSP
+#' @return Updated dsp state list
+#' @keywords internal
+sample_dsp_fast <- function(omega, evolParams, sigma_e = 1, prior_dhs_phi = c(10, 2), alphaPlusBeta = 1) {
+  ns <- asNamespace("dsp")
+  ht <- as.matrix(evolParams$ht)
+  dhs_mean <- evolParams$dhs_mean
+  dhs_phi <- evolParams$dhs_phi
+  sigma_eta_t <- evolParams$sigma_eta_t
+  sigma_eta_0 <- evolParams$sigma_eta_0
+  n <- nrow(ht)
+
+  # sampleLogVols
+  h_y <- as.numeric(omega)
+  yoffset <- if (any(h_y^2 < 1e-16)) max(1e-8, stats::mad(h_y) / 1e6) else 0
+  ystar <- log(h_y^2 + yoffset)
+  mix <- ns$sample_j_wrap(n, ystar - as.numeric(ht))
+  linht <- (ystar - mix$mean - dhs_mean) / mix$var
+  evol_prec <- c(1 / sigma_eta_0^2, 1 / as.numeric(sigma_eta_t)^2)
+  evol_prec_lag <- c(evol_prec[-1], 0)
+  q_diag <- 1 / mix$var + evol_prec + dhs_phi^2 * evol_prec_lag
+  q_off <- (-dhs_phi * evol_prec_lag)[-n]
+  ht <- matrix(dhs_mean + tridiag_sample_cpp(q_diag, q_off, linht, rnorm(n)), ncol = 1)
+
+  ht_tilde <- ht - dhs_mean
+  if (!all(dhs_phi == 0) && !all(dhs_phi == 1)) {
+    dhs_phi <- ns$sampleAR1(h_yc = ht_tilde, h_phi = dhs_phi, h_sigma_eta_t = sigma_eta_t,
+                            prior_dhs_phi = prior_dhs_phi)
+  }
+  eta_t <- ht_tilde[-1, ] - dhs_phi * ht_tilde[-n, ]
+  sigma_eta_t <- matrix(1 / sqrt(pgdraw::pgdraw(b = alphaPlusBeta, c = c(eta_t))), ncol = 1)
+  sigma_eta_0 <- 1 / sqrt(pgdraw::pgdraw(b = 1, c = c(ht_tilde[1, ])))
+  if (!all(dhs_phi == 1)) {
+    mu_s <- ns$sampleLogVolMu(h = ht, h_mu = dhs_mean, h_phi = dhs_phi, h_sigma_eta_t = sigma_eta_t,
+                              h_sigma_eta_0 = sigma_eta_0, h_log_scale = log(sigma_e^2))
+    dhs_mean <- dhs_mean0 <- mu_s$dhs_mean
+  } else {
+    dhs_mean <- 0
+    dhs_mean0 <- 0
+  }
+  list(sigma_wt = exp(ht / 2), ht = ht, dhs_mean = dhs_mean, dhs_phi = dhs_phi,
+       sigma_eta_t = sigma_eta_t, sigma_eta_0 = sigma_eta_0, dhs_mean0 = dhs_mean0)
 }
 
 #' Update Outlier Scales (Independent or Dynamic)
@@ -531,11 +603,10 @@ update_outlier_scales <- function(
       }
     }
 
-    dsp_out <- ns_dsp$sampleDSP(
+    dsp_out <- sample_dsp_fast(
       omega         = psi_tilde,
       evolParams    = dsp_state,
       sigma_e       = s_tau_psi,
-      loc           = NULL,
       prior_dhs_phi = c(10, 2),
       alphaPlusBeta = 1.0
     )

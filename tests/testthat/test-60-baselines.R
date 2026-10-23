@@ -92,10 +92,11 @@ test_that("baseline_ch4 returns a validated cpd_fit with CP and point anomalies"
 })
 
 test_that("baseline_fpnn returns a validated cpd_fit", {
-  fit <- baseline_fpnn(y_test, window_len = 10, J = 6)
+  fit <- baseline_fpnn(y_test, J = 6)
   expect_s3_class(fit, "cpd_fit")
   expect_silent(validate_cpd_fit(fit, n = n_test))
-  expect_true(fit$method %in% c("fpnn", "fpnn_placeholder"))
+  expect_equal(fit$method, "fpnn")
+  expect_true(all(fit$cp %in% fit$diag$phase1_cp))
 })
 
 test_that("baseline_abco returns a validated cpd_fit", {
@@ -110,7 +111,7 @@ test_that("fit_baseline master dispatcher works across methods", {
   for (m in methods) {
     fit_m <- fit_baseline(m, y_test)
     expect_s3_class(fit_m, "cpd_fit")
-    expect_true(fit_m$method %in% c(m, paste0(m, "_placeholder")))
+    expect_equal(fit_m$method, m)
     expect_silent(validate_cpd_fit(fit_m, n = n_test))
   }
 })

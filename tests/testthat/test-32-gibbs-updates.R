@@ -334,3 +334,61 @@ test_that("rho_noncentred_update preserves innovations and targets the right con
   expect_equal(c(h_til[1], h_til[-1] - rho * h_til[-n]), e, tolerance = 1e-8) # innovations unchanged
   expect_equal(mean(draws), mean_ref, tolerance = 0.02)
 })
+
+test_that("C++ banded factorisation matches the dense precision and the spam reference", {
+  set.seed(321)
+  n <- 30
+  y <- cumsum(rnorm(n))
+  v <- exp(rnorm(n - 1, -2, 2))
+  nu2 <- exp(rnorm(n, -3, 2))
+  bs <- init_banded_structure(n)
+  fac <- factor_mu_psi(y, 0.6, 1.1, v, nu2, bs)
+  m <- 2 * n
+  L <- matrix(0, m, m)
+  for (i in seq_len(m)) for (d in 0:3) if (i - d >= 1) L[i, i - d] <- fac$L[i, d + 1]
+  Q_dense <- as.matrix(build_mu_psi_system(y, 0.6, 1.1, v, nu2, bs)$Q)
+  expect_equal(L %*% t(L), Q_dense, tolerance = 1e-10)
+
+  ref <- factor_mu_psi_spam(y, 0.6, 1.1, v, nu2, bs)
+  expect_equal(fac$logml, ref$logml, tolerance = 1e-8)
+  mean_cpp <- band_backsolve_cpp(fac$L, fac$w)
+  expect_equal(mean_cpp, as.numeric(solve(Q_dense, build_mu_psi_system(y, 0.6, 1.1, v, nu2, bs)$b)), tolerance = 1e-8)
+})
+
+test_that("tridiagonal sampler and AR(1) filter match dense / stats::filter references", {
+  set.seed(5)
+  n <- 25
+  qd <- runif(n, 2, 4)
+  qo <- runif(n - 1, -0.9, 0.9)
+  b <- rnorm(n)
+  Q <- diag(qd)
+  Q[cbind(1:(n - 1), 2:n)] <- qo
+  Q[cbind(2:n, 1:(n - 1))] <- qo
+  expect_equal(tridiag_sample_cpp(qd, qo, b, rep(0, n)), as.numeric(solve(Q, b)), tolerance = 1e-10)
+  z <- rnorm(n)
+  U <- chol(Q)
+  expect_equal(tridiag_sample_cpp(qd, qo, b, z), as.numeric(solve(U, solve(t(U), b) + z)), tolerance = 1e-10)
+  e <- rnorm(40)
+  expect_equal(ar1_filter_cpp(e, 0.7), as.numeric(stats::filter(e, 0.7, method = "recursive")), tolerance = 1e-12)
+})
+
+test_that("sample_dsp_fast reproduces dsp::sampleDSP draw for draw", {
+  ns <- asNamespace("dsp")
+  set.seed(11)
+  psi <- matrix(c(rnorm(60, 0, 0.05), 3, -4, rnorm(38, 0, 0.05)), ncol = 1)
+  st <- ns$initDHS(psi)
+  st$sigma_wt <- NULL
+  st$dhs_phi <- 0.5
+  for (k in 1:5) {
+    set.seed(100 + k)
+    a <- ns$sampleDSP(omega = psi, evolParams = st, sigma_e = 0.1, loc = NULL, prior_dhs_phi = c(10, 2), alphaPlusBeta = 1)
+    set.seed(100 + k)
+    b <- sample_dsp_fast(omega = psi, evolParams = st, sigma_e = 0.1, prior_dhs_phi = c(10, 2), alphaPlusBeta = 1)
+    expect_equal(as.numeric(b$ht), as.numeric(a$ht), tolerance = 1e-8)
+    expect_equal(b$dhs_phi, a$dhs_phi, tolerance = 1e-8)
+    expect_equal(b$dhs_mean, a$dhs_mean, tolerance = 1e-8)
+    expect_equal(as.numeric(b$sigma_eta_t), as.numeric(a$sigma_eta_t), tolerance = 1e-8)
+    a$sigma_wt <- NULL
+    st <- a
+  }
+})

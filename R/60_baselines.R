@@ -6,20 +6,24 @@
 
 if (file.exists("R/00_utils.R")) {
   source("R/00_utils.R")
+  source("R/20_frontend_nsp.R")
   source("R/21_frontend_capa.R")
   source("R/32_gibbs_updates.R")
   source("R/40_scoring.R")
   source("R/41_bfdr.R")
   source("R/42_classify.R")
   source("R/50_copula.R")
+  source("R/61_fpnn.R")
 } else if (file.exists("../../R/00_utils.R")) {
   source("../../R/00_utils.R")
+  source("../../R/20_frontend_nsp.R")
   source("../../R/21_frontend_capa.R")
   source("../../R/32_gibbs_updates.R")
   source("../../R/40_scoring.R")
   source("../../R/41_bfdr.R")
   source("../../R/42_classify.R")
   source("../../R/50_copula.R")
+  source("../../R/61_fpnn.R")
 }
 
 suppressPackageStartupMessages({
@@ -140,7 +144,7 @@ baseline_abco <- function(y, nsave = 500, nburn = 500, nskip = 1, alpha_fdr = 0.
 #' NSP Baseline Wrapper
 #' @param y Numeric vector of time series observations
 #' @param alpha Significance level (default 0.05)
-#' @param ... Additional arguments passed to `nsp::nsp_poly_selfnorm`
+#' @param ... Additional arguments passed to `run_frontend_nsp` (nsp::nsp_poly_ar)
 #' @return A validated `cpd_fit` object
 #' @export
 baseline_nsp <- function(y, alpha = 0.05, ...) {
@@ -148,7 +152,9 @@ baseline_nsp <- function(y, alpha = 0.05, ...) {
   n <- length(y)
   stopifnot(is.numeric(y), n >= 5)
 
-  fit <- nsp::nsp_poly_selfnorm(y, deg = 0, alpha = alpha, ...)
+  # Same NSP variant as the proposed method's front-end (nsp_poly_ar, spec change C1);
+  # nsp_poly_selfnorm is miscalibrated under AR(1) noise (gate P2)
+  fit <- run_frontend_nsp(y, alpha = alpha, method = "ar", ...)
   runtime_sec <- as.numeric(proc.time()[3] - start_time)
 
   ints <- fit$intervals
@@ -156,7 +162,7 @@ baseline_nsp <- function(y, alpha = 0.05, ...) {
     cp_ints <- data.frame(start = integer(0), end = integer(0))
     cps <- integer(0)
   } else {
-    cp_ints <- data.frame(start = as.integer(ints$s), end = as.integer(ints$e))
+    cp_ints <- data.frame(start = as.integer(ints$start), end = as.integer(ints$end))
     # Change point estimate is midpoint of significant interval
     cps <- as.integer(round((cp_ints$start + cp_ints$end) / 2.0))
     cps <- sort(unique(cps[cps >= 2L & cps <= n]))
@@ -514,143 +520,78 @@ baseline_ch4 <- function(y, alpha_fdr = 0.05, n_iter = 1000, burn_in = 500, d_ps
 }
 
 # ------------------------------------------------------------------------------
-# 11. FPNN (Fourier Probabilistic Neural Network, JISPS Paper Port)
+# 11. FPNN (JISPS two-phase EV-DeCAFS + Fourier PNN; implementation in 61_fpnn.R)
 # ------------------------------------------------------------------------------
-#' FPNN Baseline (JISPS Fourier Probabilistic Neural Network Port)
+#' FPNN Baseline (JISPS EV-DeCAFS + Fourier Probabilistic Neural Network)
 #'
-#' Evaluates the Fejer-weighted Fourier density ratio on 4-dimensional local contrast
-#' features from the JISPS paper (Algorithm 2 & Algorithms 4-5):
-#'   1. Normalized mean difference across left/right windows (delta_mu)
-#'   2. Variance ratio across left/right windows (V)
-#'   3. Post-change persistence fraction within noise tolerance (S)
-#'   4. Local AR(1) residual autocorrelation (phi_local)
+#' Port of the ev-decafs-serve training and inference pipeline, run without ground truth:
+#' Phase I finds changes with EV-DeCAFS under the flat BIC penalty C log n (C = 2, the
+#' untuned default); Phase II labels them with the BOCPD oracle and Algorithm 3, balances
+#' the classes with SMOTE, fits the Fourier PNN on the series' own changes and keeps those
+#' it classifies as sustained. Recoiled changes are not shifts; the JISPS method gives no
+#' point or collective labels, so they are only reported in `diag$recoiled`. With fewer
+#' than two Phase-I changes the classifier cannot be trained and the Phase-I changes are
+#' returned as they are (`diag$fpnn_trained = FALSE`).
 #'
 #' @param y Numeric vector of time series observations
-#' @param window_len Half-window size for local contrast features (default 15)
 #' @param J Number of Fourier harmonics (default 10)
-#' @param threshold Decision threshold on change probability (default 0.5)
+#' @param bic_multiplier BIC multiplier C in alpha_0 = C log n (default 2)
+#' @param n_grid Level grid size of the EV-DeCAFS dynamic programme (default 1000)
+#' @param window_L Feature window half-width (default 5)
+#' @param evi_w,evi_q0 EVI field window half-width and exceedance quantile (50, 0.90)
+#' @param kappa_mu_percentile,kappa_S Algorithm-3 thresholds (75, 0.5)
+#' @param bocpd_threshold,bocpd_tolerance_fraction BOCPD oracle threshold and match window
+#'   as a fraction of n (0.3, 0.02)
+#' @param smote_k SMOTE neighbours (default 5)
+#' @param seed Seed for SMOTE; the caller's RNG state is restored afterwards
 #' @return A validated `cpd_fit` object
 #' @export
-baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
+baseline_fpnn <- function(y, J = 10L, bic_multiplier = 2.0, n_grid = 1000L, window_L = 5L,
+                          evi_w = 50L, evi_q0 = 0.90, kappa_mu_percentile = 75, kappa_S = 0.5,
+                          bocpd_threshold = 0.3, bocpd_tolerance_fraction = 0.02,
+                          smote_k = 5L, seed = 42L) {
   start_time <- proc.time()[3]
   n <- length(y)
-  stopifnot(is.numeric(y), n >= 2L * window_len + 2L)
+  stopifnot(is.numeric(y), n > evi_w)
 
-  # Extract JISPS sliding window features:
-  w <- window_len
-  valid_t <- (w + 1L):(n - w)
-  K <- length(valid_t)
+  old_seed <- if (exists(".Random.seed", envir = globalenv())) get(".Random.seed", envir = globalenv()) else NULL
+  on.exit(if (!is.null(old_seed)) assign(".Random.seed", old_seed, envir = globalenv()), add = TRUE)
+  set.seed(as.integer(seed))
 
-  f_mean_diff <- numeric(n)
-  f_var_diff  <- numeric(n)
-  f_persist   <- numeric(n)
-  f_phi_local <- numeric(n)
+  # Phase I
+  ar1 <- fpnn_ar1_params(y)
+  lambda_param <- 1.0 / (ar1$sigma_eta_sq + 1e-12)
+  gamma <- 1.0 / (ar1$sigma_v_sq + 1e-12)
+  xi_field <- fpnn_evi_field(y, w = evi_w, q0 = evi_q0)
+  alpha_0 <- bic_multiplier * log(n)
+  dp <- ev_decafs_dp_cpp(y, rep(alpha_0, n), lambda_param, gamma, ar1$phi, as.integer(n_grid))
+  cps_all <- as.integer(dp$changepoints)
 
-  eps_tol <- max(1e-6, median(abs(diff(y))) / sqrt(2.0))
-
-  for (i in seq_along(valid_t)) {
-    t_idx <- valid_t[i]
-    left  <- y[(t_idx - w):(t_idx - 1L)]
-    right <- y[t_idx:(t_idx + w - 1L)]
-
-    m_l <- mean(left)
-    m_r <- mean(right)
-    s_pool <- sqrt((var(left) + var(right)) / 2.0)
-    if (is.na(s_pool) || s_pool <= 1e-8) s_pool <- 1.0
-
-    # Feature 1: Normalized mean difference (delta_mu)
-    f_mean_diff[t_idx] <- abs(m_r - m_l) / s_pool
-
-    # Feature 2: Variance ratio (V)
-    f_var_diff[t_idx]  <- abs(log(max(1e-4, var(right)) / max(1e-4, var(left))))
-
-    # Feature 3: Post-change persistence (S)
-    f_persist[t_idx]   <- mean(abs(right - m_r) <= eps_tol)
-
-    # Feature 4: Local AR(1) of post-change residuals (phi_local)
-    r_r <- right - m_r
-    if (length(r_r) >= 3) {
-      den_r <- sum(r_r[-length(r_r)]^2) + 1e-10
-      num_r <- sum(r_r[-length(r_r)] * r_r[-1])
-      f_phi_local[t_idx] <- max(-0.99, min(0.99, num_r / den_r))
-    } else {
-      f_phi_local[t_idx] <- 0.0
-    }
+  # Phase II
+  trained <- length(cps_all) >= 2
+  prob_sustained <- rep(1.0, length(cps_all))
+  labels_train <- NULL
+  if (trained) {
+    X <- fpnn_extract_features(y, cps_all, dp$means, L = window_L, xi_field = xi_field)
+    bocpd_cps <- which(fpnn_bocpd(y, phi = ar1$phi, threshold = bocpd_threshold))
+    labels_train <- fpnn_make_labels(X, cps_all, bocpd_cps, tol = floor(bocpd_tolerance_fraction * n),
+                                     kappa_mu_percentile = kappa_mu_percentile, kappa_S = kappa_S)
+    bal <- fpnn_smote(X, labels_train, k = smote_k)
+    model <- fourier_pnn_fit(bal$X, bal$y, J = J)
+    proba <- fourier_pnn_predict_proba(model, X)
+    pred <- model$classes[apply(proba, 1, which.max)]
+    prob_sustained <- if ("1" %in% colnames(proba)) proba[, "1"] else rep(0.0, length(cps_all))
+    cps <- cps_all[pred == 1L]
+  } else {
+    cps <- cps_all
   }
-
-  # Scale features to [-0.5, 0.5] for Fourier series
-  scale_feat <- function(x) {
-    rng <- range(x, na.rm = TRUE)
-    if (rng[2] - rng[1] <= 1e-8) return(rep(0.0, length(x)))
-    (x - rng[1]) / (rng[2] - rng[1]) - 0.5
-  }
-
-  Z1 <- scale_feat(f_mean_diff)
-  Z2 <- scale_feat(f_var_diff)
-  Z3 <- scale_feat(f_persist)
-  Z4 <- scale_feat(f_phi_local)
-
-  # Fejer kernel Fourier density estimation (Algorithms 4 & 5)
-  # High-feature vs low-feature density ratio:
-  q80 <- quantile(f_mean_diff, 0.8)
-  nom_idx <- which(f_mean_diff <= q80)
-  cpt_idx <- which(f_mean_diff > q80)
-
-  j_seq <- seq_len(J)
-  fejer_w <- (J + 1.0 - j_seq) / (J + 1.0)
-
-  eval_fourier_density <- function(z_eval, z_train) {
-    N_tr <- length(z_train)
-    if (N_tr == 0) return(rep(1.0, length(z_eval)))
-    # Outer product for train: N_tr x J
-    angles_tr <- pi * outer(z_train, j_seq)
-    A_j <- (fejer_w / N_tr) * colSums(cos(angles_tr))
-    B_j <- (fejer_w / N_tr) * colSums(sin(angles_tr))
-
-    # Evaluate on z_eval: K x J
-    angles_ev <- pi * outer(z_eval, j_seq)
-    dens <- 0.5 + as.numeric(cos(angles_ev) %*% A_j + sin(angles_ev) %*% B_j)
-    pmax(1e-6, dens)
-  }
-
-  d_nom1 <- eval_fourier_density(Z1, Z1[nom_idx])
-  d_nom2 <- eval_fourier_density(Z2, Z2[nom_idx])
-  d_nom3 <- eval_fourier_density(Z3, Z3[nom_idx])
-  d_nom4 <- eval_fourier_density(Z4, Z4[nom_idx])
-
-  d_cpt1 <- eval_fourier_density(Z1, Z1[cpt_idx])
-  d_cpt2 <- eval_fourier_density(Z2, Z2[cpt_idx])
-  d_cpt3 <- eval_fourier_density(Z3, Z3[cpt_idx])
-  d_cpt4 <- eval_fourier_density(Z4, Z4[cpt_idx])
-
-  lik_cpt <- d_cpt1 * d_cpt2 * d_cpt3 * d_cpt4
-  lik_nom <- d_nom1 * d_nom2 * d_nom3 * d_nom4
-  prob_cpt <- lik_cpt / (lik_cpt + lik_nom)
-  prob_cpt[1:w] <- 0.0
-  prob_cpt[(n - w + 1L):n] <- 0.0
-
-  # Detect change points as local maxima exceeding threshold
-  cps <- integer(0)
-  for (t_idx in (w + 1L):(n - w)) {
-    if (prob_cpt[t_idx] >= threshold) {
-      local_win <- prob_cpt[(t_idx - 2L):(t_idx + 2L)]
-      if (prob_cpt[t_idx] == max(local_win)) {
-        cps <- c(cps, t_idx)
-      }
-    }
-  }
-  cps <- sort(unique(cps))
 
   runtime_sec <- as.numeric(proc.time()[3] - start_time)
 
   class_vec <- rep("nominal", n)
-  if (length(cps) > 0) class_vec[cps] <- "shift"
-
-  scores_df <- data.frame(
-    t     = seq_len(n),
-    s_cp  = prob_cpt,
-    s_out = rep(NA_real_, n)
-  )
+  class_vec[cps] <- "shift"
+  s_cp <- numeric(n)
+  s_cp[cps_all] <- prob_sustained
 
   new_cpd_fit(
     method      = "fpnn",
@@ -659,9 +600,10 @@ baseline_fpnn <- function(y, window_len = 15, J = 10, threshold = 0.5) {
     point       = integer(0),
     collective  = NULL,
     class       = factor(class_vec, levels = CPD_CLASS_LEVELS),
-    scores      = scores_df,
+    scores      = data.frame(t = seq_len(n), s_cp = s_cp, s_out = rep(NA_real_, n)),
     runtime_sec = runtime_sec,
-    diag        = list(prob_cpt = prob_cpt, J = J, window_len = window_len)
+    diag        = list(phase1_cp = cps_all, recoiled = setdiff(cps_all, cps), fpnn_trained = trained,
+                       labels_train = labels_train, alpha_0 = alpha_0, ar1 = ar1, J = J)
   )
 }
 

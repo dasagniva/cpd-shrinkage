@@ -270,3 +270,57 @@ log_msg <- function(..., level = "INFO") {
   msg <- paste0(...)
   cat(sprintf("[%s] [%-5s] %s\n", ts, toupper(level), msg))
 }
+
+#' Hard cap on the number of CPU cores a run may use
+#'
+#' Read from the environment variable CPD_MAX_CORES (default 24 of this machine's 32
+#' logical cores, to limit thermal load). Every parallel runner takes its worker count
+#' from cpd_workers(), so the cap holds for all of them.
+#'
+#' @return Integer
+#' @export
+cpd_max_cores <- function() {
+  cap <- suppressWarnings(as.integer(Sys.getenv("CPD_MAX_CORES", "24")))
+  if (is.na(cap) || cap < 1L) cap <- 24L
+  cap
+}
+
+#' Number of parallel workers to use, never above cpd_max_cores()
+#'
+#' @param requested Requested number of workers (NULL: as many as the cap allows)
+#' @return Integer
+#' @export
+cpd_workers <- function(requested = NULL) {
+  avail <- max(1L, parallel::detectCores(), na.rm = TRUE)
+  min(if (is.null(requested)) avail else as.integer(requested), cpd_max_cores(), avail)
+}
+
+#' Time after which a run stops starting new tasks (environment variable CPD_STOP_AT)
+#'
+#' Accepts "HH:MM" (the next such time from now) or a full date-time such as
+#' "2026-10-22 18:30:00". Returns NULL when unset. Tasks already running always finish
+#' and are saved, so a stop loses nothing.
+#'
+#' @return POSIXct or NULL
+#' @export
+cpd_stop_time <- function() {
+  s <- trimws(Sys.getenv("CPD_STOP_AT"))
+  if (!nzchar(s)) return(NULL)
+  if (grepl("^[0-9]{1,2}:[0-9]{2}$", s)) {
+    t <- as.POSIXct(paste(Sys.Date(), s), format = "%Y-%m-%d %H:%M")
+    if (!is.na(t) && t <= Sys.time()) t <- t + 86400
+  } else {
+    t <- as.POSIXct(s)
+  }
+  if (is.na(t)) stop("CPD_STOP_AT not understood: ", s)
+  t
+}
+
+#' Should a runner stop starting new tasks? (STOP file in the project root, or deadline passed)
+#'
+#' @param stop_time Result of cpd_stop_time()
+#' @return Logical
+#' @export
+cpd_should_stop <- function(stop_time = NULL) {
+  file.exists("STOP") || (!is.null(stop_time) && Sys.time() >= stop_time)
+}

@@ -369,3 +369,61 @@ table_sensitivity_latex <- function(sens_df, output_file = "output/tab4_sensitiv
 
   tex_code
 }
+
+#' LaTeX Table of a Simulation Metric: Cells x Methods, "mean (MC SE)" in Every Entry
+#'
+#' @param summ Output of `summarise_p8_metric` for one metric
+#' @param caption Table caption
+#' @param output_file Path to save .tex file
+#' @export
+table_sim_metric_latex <- function(summ, caption, output_file) {
+  cells <- unique(create_simulation_grid()$cell_id)
+  methods <- c("proposed", setdiff(sort(unique(summ$method)), "proposed"))
+  entry <- sprintf("%.2f (%.2f)", summ$mean, summ$se)
+  tab <- matrix("--", nrow = length(cells), ncol = length(methods), dimnames = list(cells, methods))
+  tab[cbind(match(summ$cell_id, cells), match(summ$method, methods))] <- entry
+  df_tab <- data.frame(Cell = gsub("_", "\\\\_", cells), tab, check.names = FALSE, stringsAsFactors = FALSE)
+  tex_code <- kable(df_tab, format = "latex", booktabs = TRUE, escape = FALSE, row.names = FALSE, caption = caption) %>%
+    kable_styling(latex_options = c("scale_down", "hold_position"))
+  if (!is.null(output_file)) {
+    dir.create(dirname(output_file), showWarnings = FALSE, recursive = TRUE)
+    writeLines(as.character(tex_code), output_file)
+    cat(sprintf("Table saved to %s\n", output_file))
+  }
+  tex_code
+}
+
+#' LaTeX Table of Replicated Results: one row per setting, "mean (MC SE)" per metric
+#'
+#' Used for the replicated ablation (Table 3) and sensitivity (Table 4) studies.
+#'
+#' @param df Long data frame with one row per replicate and setting
+#' @param by Columns identifying a setting (kept in order of first appearance)
+#' @param metrics Metric columns to summarise
+#' @param caption,output_file Caption and output path
+#' @return list(table = summary data frame, tex = LaTeX code)
+#' @export
+table_replicated_latex <- function(df, by, metrics, caption, output_file) {
+  key <- do.call(paste, c(df[by], sep = "\r"))
+  keys <- unique(key)
+  rows <- lapply(keys, function(k) {
+    d <- df[key == k, , drop = FALSE]
+    out <- d[1, by, drop = FALSE]
+    for (m in metrics) {
+      x <- d[[m]]
+      out[[m]] <- sprintf("%.2f (%.2f)", mean(x, na.rm = TRUE), stats::sd(x, na.rm = TRUE) / sqrt(sum(!is.na(x))))
+    }
+    out$reps <- nrow(d)
+    out
+  })
+  tab <- do.call(rbind, rows)
+  rownames(tab) <- NULL
+  tex <- kable(tab, format = "latex", booktabs = TRUE, caption = caption) %>%
+    kable_styling(latex_options = c("scale_down", "hold_position"))
+  if (!is.null(output_file)) {
+    dir.create(dirname(output_file), showWarnings = FALSE, recursive = TRUE)
+    writeLines(as.character(tex), output_file)
+    cat(sprintf("Table saved to %s\n", output_file))
+  }
+  list(table = tab, tex = tex)
+}

@@ -19,9 +19,10 @@ test_that("evaluate_change_points calculates exact precision, recall, F1, Hausdo
 
   eval_res <- evaluate_change_points(truth_cp, est_cp, n, base_margin = 5)
 
-  # Margin for n = 100: max(2, round(5 * 100 / 1000)) = 2
-  expect_equal(eval_res$margin, 2L)
-  # Est 26 matches 25 (|26-25|=1 <= 2). Est 80 matches none. Prec = 1/2 = 0.5
+  # Margin for n <= 1000 is 5 (spec Section 6); 2000 points give 10
+  expect_equal(eval_res$margin, 5L)
+  expect_equal(evaluate_change_points(truth_cp, est_cp, 2000, base_margin = 5)$margin, 10L)
+  # Est 26 matches 25 (|26-25|=1 <= 5). Est 80 matches none. Prec = 1/2 = 0.5
   expect_equal(eval_res$precision, 0.5)
   # True 25 matches 26. True 60 matches none. Rec = 1/2 = 0.5
   expect_equal(eval_res$recall, 0.5)

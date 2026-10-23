@@ -1,241 +1,217 @@
 # ==============================================================================
 # test_geweke_getting_it_right.R
-# Geweke (2004) "Getting It Right: Joint Distribution Tests of Posterior Simulators"
-# Correctness test verifying that the Gibbs sampler conditionals target the exact
-# joint distribution p(theta, y) specified by the model priors and likelihood.
+# Geweke (2004) "Getting it right" joint-distribution test of the production Gibbs
+# sampler (Phase P4 gate), with stationary starts.
+#
+# If every conditional update leaves p(theta | y) invariant, the successive-conditional
+# kernel -- one sweep of run_gibbs_chain() given y, then y ~ p(y | theta) -- leaves the
+# joint p(theta, y) invariant. Each of N_CHAINS chains is therefore started from an exact
+# joint draw (theta_0, y_0), including the Makalic-Schmidt and Polya-Gamma auxiliaries
+# drawn from their conditionals, and run for K sweeps; under a correct sampler the final
+# states are independent exact draws from p(theta, y), whatever the mixing. Their test
+# functions are compared with an independent forward (marginal-conditional) sample by
+# two-sample z-tests, Bonferroni-adjusted. A wrong update makes the distribution drift
+# away from p(theta, y) within the K sweeps. (A single long chain, as in Geweke's
+# original design, cannot be used here: under the horseshoe+ prior the joint chain
+# random-walks over levels and scales spanning many orders of magnitude.)
+#
+# The successive-conditional kernel is the production chain itself (run_gibbs_chain with
+# geweke_fun and init_state), so the test covers the update order, the marginal-scale
+# Metropolis steps, dsp's dynamic horseshoe, the non-centred rho step, kappa and the
+# CAPA offset. The model matches the code: mu_1 ~ N(0, MU1_PRIOR_VAR); omega_t ~ N(0,
+# sigma^2 v_t), v_t = clip(tau^2 kappa_t^2 lambda_t^2 eta_t^2) with lambda_t, eta_t ~
+# C+(0, 1), tau ~ C+(0, 1/sqrt(n)); (phi + 1)/2 ~ Beta(10, 2) truncated to |phi| <= 0.95;
+# dynamic outliers psi_t ~ N(0, clip(exp(m_h + h~_t + delta a_t))), h~_1 = e_1,
+# h~_t = rho h~_{t-1} + e_t, e_t = log(C+(0, 1)^2), exp(m_h / 2) ~ C+(0, 1/sqrt(n)),
+# (rho + 1)/2 ~ Beta(10, 2); clip() is the sampler's numerical guard [1e-12, 1e12]. The
+# spec's Jeffreys prior on sigma^2 is improper, so the test uses sigma^2 ~ IG(3, 2)
+# (passed to the production update_sigma2).
+#
+# The horseshoe(+) priors give mu, omega, psi and y no finite mean, so the test functions
+# are bounded (atan, indicators, correlations) or logs of scales. A planted error (the
+# sampler given a different sigma^2 prior) checks that the test can fail.
 # ==============================================================================
 
+suppressPackageStartupMessages({
+  library(parallel)
+  library(posterior)
+})
 source("R/00_utils.R")
 source("R/32_gibbs_updates.R")
+source("R/40_scoring.R")
+source("R/41_bfdr.R")
+source("R/42_classify.R")
+source("R/31_gibbs_sampler.R")
 
-suppressPackageStartupMessages({
-  library(coda)
-})
+n <- 40L
+N_FWD <- 100000L # independent marginal-conditional draws
+N_CHAINS <- 4000L # chains, each started from an exact joint draw
+K <- 100L # successive-conditional sweeps per chain
+SIGMA2_PRIOR <- c(3, 2)
+PHI_PRIOR <- c(10, 2)
+ALPHA <- 0.01 # family-wise level (Bonferroni over test functions)
+N_WORKERS <- cpd_workers(if (nzchar(Sys.getenv("GEWEKE_WORKERS"))) as.integer(Sys.getenv("GEWEKE_WORKERS")) else NULL)
 
-cat("=== Starting Geweke (2004) Getting-it-Right Joint Distribution Test ===\n")
+kappa_vec <- rep(1.0, n)
+kappa_vec[15:22] <- 2.0 # NSP-style inflated region
+a_vec <- rep(0.0, n)
+a_vec[c(10, 30)] <- 1.0 # CAPA point flags
+T_IN <- 20L  # increment inside the inflated region
+T_OUT <- 6L  # increment outside it
 
-set.seed(20261021)
-n <- 30
-S1 <- 1500  # Number of forward joint draws (Simulator 1)
-S2 <- 3000  # Number of alternating MCMC draws (Simulator 2)
-burn2 <- 500
-
-s_tau <- 1.0 / sqrt(n)
-a_phi <- 10.0
-b_phi <- 2.0
-phi_max <- 0.95
-banded_struct <- init_banded_structure(n)
-
-# ------------------------------------------------------------------------------
-# 1. Forward Simulator (Simulator 1: Joint distribution p(theta, y))
-# ------------------------------------------------------------------------------
-cat(sprintf("Generating %d independent draws from forward joint distribution...\n", S1))
-
-sim1_draws <- matrix(NA_real_, nrow = S1, ncol = 6,
-                     dimnames = list(NULL, c("phi", "sigma", "mean_y", "sd_y", "mean_mu", "sd_mu")))
-
-for (s in seq_len(S1)) {
-  # Prior on phi: (phi + 1)/2 ~ Beta(a_phi, b_phi) truncated to [-phi_max, phi_max]
-  raw_phi <- rbeta(1, a_phi, b_phi)
-  phi_val <- pmax(-phi_max, pmin(phi_max, 2.0 * raw_phi - 1.0))
-
-  # Prior on sigma^2: Jeffreys-like or Inv-Gamma(2, 2)
-  # Here sigma^2 ~ Inv-Gamma(shape = 3, rate = 2) so mean = 1.0
-  sigma2_val <- 1.0 / rgamma(1, shape = 3.0, rate = 2.0)
-  sigma_val <- sqrt(sigma2_val)
-
-  # Scale priors: Horseshoe+
-  tau_w <- abs(rcauchy(1, 0, s_tau))
-  lam_w <- abs(rcauchy(n - 1, 0, 1))
-  eta_w <- abs(rcauchy(n - 1, 0, 1))
-  v_w <- (sigma_val * tau_w * lam_w * eta_w)^2
-
-  tau_psi <- abs(rcauchy(1, 0, 1.0 / sqrt(n)))
-  lam_psi <- abs(rcauchy(n, 0, 1))
-  eta_psi <- abs(rcauchy(n, 0, 1))
-  nu2_val <- (tau_psi * lam_psi * eta_psi)^2
-
-  # mu_1 ~ N(0, 100^2), omega_t ~ N(0, v_w_t)
-  omega_val <- rnorm(n - 1, 0, sqrt(v_w))
-  mu_val <- numeric(n)
-  mu_val[1] <- rnorm(1, 0, 10.0)
-  for (t in 2:n) mu_val[t] <- mu_val[t - 1] + omega_val[t - 1]
-
-  # psi_t ~ N(0, nu2_t)
-  psi_val <- rnorm(n, 0, sqrt(nu2_val))
-
-  # AR(1) innovations
-  eps <- numeric(n)
-  eps[1] <- rnorm(1, 0, sigma_val / sqrt(1.0 - phi_val^2))
-  for (t in 2:n) eps[t] <- phi_val * eps[t - 1] + rnorm(1, 0, sigma_val)
-
-  y_val <- mu_val + psi_val + eps
-
-  sim1_draws[s, ] <- c(
-    phi_val,
-    sigma_val,
-    mean(y_val),
-    sd(y_val),
-    mean(mu_val),
-    sd(mu_val)
-  )
-}
-
-# ------------------------------------------------------------------------------
-# 2. Alternating Posterior Simulator (Simulator 2: Gibbs chain on joint space)
-# ------------------------------------------------------------------------------
-cat(sprintf("Generating %d draws from alternating MCMC joint simulator (burn-in = %d)...\n", S2, burn2))
-
-# Initialize state from prior
-phi_curr <- 0.5
-sigma2_curr <- 1.0
-sigma_curr <- sqrt(sigma2_curr)
-tau_w_curr <- 0.1
-lam_w_curr <- rep(1.0, n - 1)
-eta_w_curr <- rep(1.0, n - 1)
-aux_lam_w <- rep(1.0, n - 1)
-aux_eta_w <- rep(1.0, n - 1)
-v_w_curr <- (sigma_curr * tau_w_curr * lam_w_curr * eta_w_curr)^2
-
-tau_psi_curr <- 0.1
-lam_psi_curr <- rep(1.0, n)
-eta_psi_curr <- rep(1.0, n)
-aux_lam_psi <- rep(1.0, n)
-aux_eta_psi <- rep(1.0, n)
-nu2_curr <- (tau_psi_curr * lam_psi_curr * eta_psi_curr)^2
-
-mu_curr <- rep(0.0, n)
-psi_curr <- rep(0.0, n)
-y_curr <- rnorm(n, 0, 1.0)
-
-sim2_draws <- matrix(NA_real_, nrow = S2, ncol = 6,
-                     dimnames = list(NULL, c("phi", "sigma", "mean_y", "sd_y", "mean_mu", "sd_mu")))
-
-total_iter2 <- burn2 + S2
-
-for (iter in seq_len(total_iter2)) {
-  # --- Step A: Posterior update theta ~ p(theta | y_curr) ---
-  # 1. Update (mu, psi) given y_curr, phi, sigma, scales
-  mp <- update_mu_psi(y_curr, phi_curr, sigma_curr, v_w_curr, nu2_curr, banded_struct = banded_struct)
-  mu_curr <- mp$mu
-  psi_curr <- mp$psi
-  omega_curr <- diff(mu_curr)
-
-  # 2. Update phi given e = y - mu - psi
-  e_curr <- y_curr - mu_curr - psi_curr
-  phi_res <- update_phi(e_curr, phi_curr, sigma_curr, a_phi = a_phi, b_phi = b_phi, phi_max = phi_max)
-  phi_curr <- phi_res$phi
-
-  # 3. Update sigma^2 given prewhitened innovations and omega
-  u_curr <- c(sqrt(1.0 - phi_curr^2) * e_curr[1], e_curr[-1] - phi_curr * e_curr[-n])
-  v_ratio <- (tau_w_curr * lam_w_curr * eta_w_curr)^2
-  # Posterior IG shape = a0 + (n + n - 1)/2, rate = b0 + (sum(u^2) + sum(omega^2/v_ratio))/2
-  # With prior IG(shape = 3, rate = 2):
-  shape_sig <- 3.0 + (n + (n - 1)) / 2.0
-  rate_sig  <- 2.0 + 0.5 * (sum(u_curr^2) + sum(omega_curr^2 / v_ratio))
-  sigma2_curr <- 1.0 / rgamma(1, shape = shape_sig, rate = rate_sig)
-  sigma_curr <- sqrt(sigma2_curr)
-
-  # 4. Update increment scales
-  hs_res <- update_hsplus_scales(
-    omega = omega_curr,
-    sigma = sigma_curr,
-    tau_omega = tau_w_curr,
-    lambda_omega = lam_w_curr,
-    eta_omega = eta_w_curr,
-    kappa = rep(1.0, n - 1),
-    aux_lambda = aux_lam_w,
-    aux_eta = aux_eta_w,
-    s_tau = s_tau,
-    update_tau = TRUE
-  )
-  tau_w_curr <- hs_res$tau_omega
-  lam_w_curr <- hs_res$lambda_omega
-  eta_w_curr <- hs_res$eta_omega
-  aux_lam_w  <- hs_res$aux_lambda
-  aux_eta_w  <- hs_res$aux_eta
-  v_w_curr   <- hs_res$v_omega
-
-  # 5. Update outlier scales (independent)
-  out_res <- update_outlier_scales(
-    psi = psi_curr, tau_psi = tau_psi_curr, lambda_psi = lam_psi_curr, eta_psi = eta_psi_curr,
-    aux_lambda_psi = aux_lam_psi, aux_eta_psi = aux_eta_psi, dynamic = FALSE
-  )
-  tau_psi_curr <- out_res$tau_psi
-  lam_psi_curr <- out_res$lambda_psi
-  eta_psi_curr <- out_res$eta_psi
-  aux_lam_psi  <- out_res$aux_lambda_psi
-  aux_eta_psi  <- out_res$aux_eta_psi
-  nu2_curr     <- out_res$nu2
-
-  # --- Step B: Data conditional update y ~ p(y | theta) ---
-  eps_new <- numeric(n)
-  eps_new[1] <- rnorm(1, 0, sigma_curr / sqrt(1.0 - phi_curr^2))
-  for (t in 2:n) eps_new[t] <- phi_curr * eps_new[t - 1] + rnorm(1, 0, sigma_curr)
-  y_curr <- mu_curr + psi_curr + eps_new
-
-  if (iter > burn2) {
-    idx <- iter - burn2
-    sim2_draws[idx, ] <- c(
-      phi_curr,
-      sigma_curr,
-      mean(y_curr),
-      sd(y_curr),
-      mean(mu_curr),
-      sd(mu_curr)
-    )
-  }
-}
-
-# ------------------------------------------------------------------------------
-# 3. Geweke Two-Sample Comparison (Z-scores and p-values)
-# ------------------------------------------------------------------------------
-cat("\n--- Geweke (2004) Test Function Comparisons ---\n")
-var_names <- colnames(sim1_draws)
-
-test_table <- data.frame(
-  Variable   = var_names,
-  Mean_Sim1  = numeric(length(var_names)),
-  SE_Sim1    = numeric(length(var_names)),
-  Mean_Sim2  = numeric(length(var_names)),
-  SE_Sim2    = numeric(length(var_names)),
-  Z_stat     = numeric(length(var_names)),
-  p_val      = numeric(length(var_names))
+configs <- list(
+  production = list(dynamic = TRUE, delta = 1.0, kappa = kappa_vec, a_vec = a_vec, tau_fixed = NULL,
+                    sampler_sigma2_prior = SIGMA2_PRIOR),
+  plugin_indep = list(dynamic = FALSE, delta = 0.0, kappa = rep(1.0, n), a_vec = rep(0.0, n),
+                      tau_fixed = (0.02 / 0.98) / sqrt(n), sampler_sigma2_prior = SIGMA2_PRIOR),
+  planted_error = list(dynamic = TRUE, delta = 1.0, kappa = kappa_vec, a_vec = a_vec, tau_fixed = NULL,
+                       sampler_sigma2_prior = c(3, 3))
 )
 
-for (j in seq_along(var_names)) {
-  x1 <- sim1_draws[, j]
-  m1 <- mean(x1)
-  se1 <- sd(x1) / sqrt(S1)
-
-  x2 <- sim2_draws[, j]
-  m2 <- mean(x2)
-  # Spectral standard error of MCMC chain using AR spectral density at frequency 0
-  mc_obj <- coda::as.mcmc(x2)
-  se2 <- sqrt(coda::spectrum0.ar(mc_obj)$spec / S2)
-
-  z_val <- (m1 - m2) / sqrt(se1^2 + se2^2)
-  p_val <- 2.0 * (1.0 - pnorm(abs(z_val)))
-
-  test_table$Mean_Sim1[j] <- m1
-  test_table$SE_Sim1[j]   <- se1
-  test_table$Mean_Sim2[j] <- m2
-  test_table$SE_Sim2[j]   <- se2
-  test_table$Z_stat[j]    <- z_val
-  test_table$p_val[j]     <- p_val
-
-  cat(sprintf("%-10s: Sim1 = %8.4f (+-%.4f) | Sim2 = %8.4f (+-%.4f) | Z = %6.2f | p = %.3f\n",
-              var_names[j], m1, se1, m2, se2, z_val, p_val))
+test_functions <- function(s, cfg) {
+  w <- diff(s$mu)
+  dy <- diff(s$y)
+  g <- c(
+    phi           = s$phi,
+    phi_sq        = s$phi^2,
+    log_sigma     = log(s$sigma),
+    log_sigma_sq  = log(s$sigma)^2,
+    atan_w_in     = atan(w[T_IN - 1L] / s$sigma),
+    atan_w_out    = atan(w[T_OUT - 1L] / s$sigma),
+    big_w_in      = as.numeric(abs(w[T_IN - 1L]) > s$sigma),
+    big_w_out     = as.numeric(abs(w[T_OUT - 1L]) > s$sigma),
+    log_le_in     = log(s$lambda_omega[T_IN - 1L] * s$eta_omega[T_IN - 1L]),
+    log_le_out    = log(s$lambda_omega[T_OUT - 1L] * s$eta_omega[T_OUT - 1L]),
+    log_nu2_flag  = log(s$nu2[10]),
+    log_nu2_plain = log(s$nu2[20]),
+    atan_psi_flag = atan(s$psi[10] / s$sigma),
+    atan_psi      = atan(s$psi[20] / s$sigma),
+    acf1_dy       = sum(dy[-1] * dy[-length(dy)]) / sum(dy^2),
+    log_mad_dy    = log(stats::median(abs(dy))),
+    atan_dy_in    = atan(dy[T_IN - 1L] / s$sigma)
+  )
+  if (is.null(cfg$tau_fixed)) g <- c(g, log_tau_omega = log(s$tau_omega))
+  if (cfg$dynamic) g <- c(g, rho = s$rho, m_h = s$m_h) else g <- c(g, log_tau_psi = log(s$tau_psi))
+  g
 }
 
-geweke_passed <- all(abs(test_table$Z_stat) < 2.58) && (min(test_table$p_val) >= 0.01)
-cat(sprintf("\nGeweke Joint Distribution Test Passed (|Z| < 2.58, p >= 0.01): %s\n", geweke_passed))
+rhalfcauchy <- function(k, s = 1) abs(stats::rcauchy(k, 0, s))
+clip <- function(v) pmin(1e12, pmax(1e-12, v))
+# Makalic-Schmidt auxiliary of a half-Cauchy scale l: nu | l ~ IG(1, 1 + 1/l^2)
+aux_of <- function(l) 1 / stats::rgamma(length(l), shape = 1, rate = 1 + 1 / l^2)
 
+forward_draw <- function(cfg) {
+  repeat {
+    phi <- 2 * stats::rbeta(1, PHI_PRIOR[1], PHI_PRIOR[2]) - 1
+    if (abs(phi) <= 0.95) break # truncation by rejection, not clipping
+  }
+  sigma <- sqrt(1 / stats::rgamma(1, shape = SIGMA2_PRIOR[1], rate = SIGMA2_PRIOR[2]))
+  tau <- if (is.null(cfg$tau_fixed)) rhalfcauchy(1, 1 / sqrt(n)) else cfg$tau_fixed
+  lam <- rhalfcauchy(n - 1)
+  eta <- rhalfcauchy(n - 1)
+  w <- stats::rnorm(n - 1, 0, sigma * sqrt(clip((tau * cfg$kappa[-1] * lam * eta)^2)))
+  mu <- cumsum(c(stats::rnorm(1, 0, sqrt(MU1_PRIOR_VAR)), w))
+
+  st <- list(tau_omega = tau, lambda_omega = lam, eta_omega = eta,
+             aux_lambda_omega = aux_of(lam), aux_eta_omega = aux_of(eta))
+  rho <- m_h <- tau_psi <- NA_real_
+  if (cfg$dynamic) {
+    m_h <- 2 * log(rhalfcauchy(1, 1 / sqrt(n)))
+    rho <- 2 * stats::rbeta(1, 10, 2) - 1
+    e <- log(rhalfcauchy(n)^2)
+    h_til <- as.numeric(stats::filter(e, rho, method = "recursive"))
+    nu2 <- clip(exp(m_h + h_til + cfg$delta * cfg$a_vec))
+    # dsp state, with the Polya-Gamma auxiliaries drawn given the innovations
+    st$dsp_state <- list(ht = matrix(m_h + h_til, ncol = 1), dhs_mean = m_h, dhs_phi = rho,
+                         sigma_eta_t = matrix(1 / sqrt(pgdraw::pgdraw(1, e[-1])), ncol = 1),
+                         sigma_eta_0 = 1 / sqrt(pgdraw::pgdraw(1, e[1])), dhs_mean0 = m_h)
+  } else {
+    tau_psi <- rhalfcauchy(1, 1 / sqrt(n))
+    lp <- rhalfcauchy(n)
+    ep <- rhalfcauchy(n)
+    nu2 <- clip((tau_psi * lp * ep)^2)
+    st <- c(st, list(tau_psi = tau_psi, lambda_psi = lp, eta_psi = ep, aux_lambda_psi = aux_of(lp),
+                     aux_eta_psi = aux_of(ep)))
+  }
+  psi <- stats::rnorm(n, 0, sqrt(nu2))
+  u <- c(stats::rnorm(1, 0, sigma / sqrt(1 - phi^2)), sigma * stats::rnorm(n - 1))
+  y <- mu + psi + as.numeric(stats::filter(u, phi, method = "recursive"))
+  c(st, list(y = y, mu = mu, psi = psi, phi = phi, sigma = sigma, nu2 = nu2, tau_psi = tau_psi,
+             rho = rho, m_h = m_h))
+}
+
+run_config <- function(name, cfg, seed) {
+  set.seed(seed)
+  n_g <- length(test_functions(forward_draw(cfg), cfg))
+  fwd <- t(vapply(seq_len(N_FWD), function(i) test_functions(forward_draw(cfg), cfg), numeric(n_g)))
+
+  RNGkind("L'Ecuyer-CMRG")
+  set.seed(seed + 1L)
+  final <- mclapply(seq_len(N_CHAINS), function(k) {
+    s0 <- forward_draw(cfg)
+    out <- tryCatch(run_gibbs_chain(
+      chain_id = k, y = s0$y, kappa = cfg$kappa, a_vec = cfg$a_vec, n_iter = K, burn_in = K - 1L,
+      dynamic = cfg$dynamic, delta = cfg$delta, tau_omega_fixed = cfg$tau_fixed,
+      phi_prior = PHI_PRIOR, sigma2_prior = cfg$sampler_sigma2_prior, init_state = s0,
+      geweke_fun = function(s) test_functions(s, cfg)
+    )$geweke_draws, error = function(e) NULL)
+    if (is.null(out)) rep(NA_real_, n_g) else out[nrow(out), ]
+  }, mc.cores = N_WORKERS, mc.set.seed = TRUE)
+  RNGkind("default")
+  fin <- do.call(rbind, final)
+  n_fail <- sum(!stats::complete.cases(fin))
+  if (n_fail > 0.001 * N_CHAINS) stop(sprintf("[%s] %d of %d chains failed", name, n_fail, N_CHAINS))
+  fin <- fin[stats::complete.cases(fin), , drop = FALSE]
+
+  tab <- do.call(rbind, lapply(colnames(fwd), function(v) {
+    x1 <- fwd[, v]
+    x2 <- fin[, v]
+    se1 <- stats::sd(x1) / sqrt(length(x1))
+    se2 <- stats::sd(x2) / sqrt(length(x2))
+    z <- (mean(x1) - mean(x2)) / sqrt(se1^2 + se2^2)
+    data.frame(config = name, variable = v, mean_forward = mean(x1), se_forward = se1, mean_chain = mean(x2),
+               se_chain = se2, z = z, p_value = 2 * stats::pnorm(-abs(z)))
+  }))
+  tab$p_bonferroni <- pmin(1, tab$p_value * nrow(tab))
+  attr(tab, "n_failed_chains") <- n_fail
+  tab
+}
+
+t0 <- proc.time()[3]
+results <- list()
+for (k in seq_along(configs)) {
+  nm <- names(configs)[k]
+  cat(sprintf("\n=== Geweke test, configuration '%s' (%d forward draws; %d chains of %d sweeps from exact joint draws) ===\n",
+              nm, N_FWD, N_CHAINS, K))
+  results[[nm]] <- run_config(nm, configs[[nm]], seed = 20261021L + 100L * k)
+  print(results[[nm]][, c("variable", "mean_forward", "mean_chain", "se_chain", "z", "p_bonferroni")],
+        digits = 3, row.names = FALSE)
+}
+runtime_min <- (proc.time()[3] - t0) / 60
+
+verdict <- function(tab) {
+  list(min_p_bonferroni = min(tab$p_bonferroni), n_failed_chains = attr(tab, "n_failed_chains"),
+       passed = min(tab$p_bonferroni) >= ALPHA)
+}
+v <- lapply(results, verdict)
+passed <- v$production$passed && v$plugin_indep$passed
+power_ok <- v$planted_error$min_p_bonferroni < ALPHA
+
+cat(sprintf("\nproduction: %s | plugin_indep: %s | planted error detected: %s | %.1f min\n",
+            v$production$passed, v$plugin_indep$passed, power_ok, runtime_min))
+
+dir.create("output", showWarnings = FALSE)
 saveRDS(list(
-  test_table = test_table,
-  passed     = geweke_passed,
-  timestamp  = Sys.time()
+  test_table   = do.call(rbind, results),
+  verdicts     = v,
+  passed       = passed,
+  power_ok     = power_ok,
+  settings     = list(n = n, N_FWD = N_FWD, N_CHAINS = N_CHAINS, K = K, alpha = ALPHA,
+                      sigma2_prior = SIGMA2_PRIOR, phi_prior = PHI_PRIOR),
+  runtime_min  = runtime_min,
+  timestamp    = Sys.time()
 ), "output/geweke_test_results.rds")
 
-if (!geweke_passed) stop("Geweke joint distribution test FAILED")
-cat(">>> GEWEKE GETTING-IT-RIGHT TEST: PASSED <<<\n")
+if (!power_ok) stop("Geweke test did not detect the planted error: it has too little power")
+if (!passed) stop("Geweke joint distribution test FAILED")
+cat(">>> GEWEKE GETTING-IT-RIGHT TEST: PASSED (planted error detected) <<<\n")

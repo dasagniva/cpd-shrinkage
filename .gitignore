@@ -18,3 +18,9 @@ output/*
 # Stan compiled binaries
 stan/*
 !stan/*.stan
+
+# Rcpp build cache
+.rcpp_cache/
+
+# Run control
+STOP

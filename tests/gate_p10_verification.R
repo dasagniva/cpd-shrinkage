@@ -36,7 +36,9 @@ stopifnot(fig_ok)
 # 2. Check LaTeX Tables
 cat("\n2. Checking publication LaTeX tables in output/...\n")
 tables <- c(
-  "output/tab1_sim_summary.tex",
+  "output/tab1_sim_cp_f1.tex",
+  "output/tab1_sim_pt_f1.tex",
+  "output/tab1_sim_macro_f1.tex",
   "output/tab2_real_data.tex",
   "output/tab3_ablation.tex",
   "output/tab4_sensitivity.tex"
@@ -64,7 +66,24 @@ stopifnot(file.exists("_targets.R"))
 parsed <- parse("_targets.R")
 cat(sprintf("  [OK] _targets.R parsed cleanly (%d top-level expressions)\n", length(parsed)))
 
-gate_p10_passed <- fig_ok && tab_ok
+# 4. Every output must be newer than the results it is built from (stale outputs fail)
+cat("\n4. Checking that outputs are newer than their source results...\n")
+sources <- list(
+  "output/gate_p8_results.rds" = c(grep("tab1_", tables, value = TRUE), "output/fig2_sim_factor_effects.png"),
+  "output/gate_p9_results.rds" = c("output/tab2_real_data.tex", "output/tab3_ablation.tex", "output/tab4_sensitivity.tex",
+                                   "output/fig1_real_data_four_panel.png", "output/fig3_identifiability_quadrants.png")
+)
+fresh_ok <- TRUE
+for (src in names(sources)) {
+  stopifnot(file.exists(src))
+  for (f in sources[[src]]) {
+    ok <- file.exists(f) && file.mtime(f) >= file.mtime(src)
+    cat(sprintf("  [%s] %-42s vs %s\n", if (ok) "OK" else "STALE", f, src))
+    fresh_ok <- fresh_ok && ok
+  }
+}
+
+gate_p10_passed <- fig_ok && tab_ok && fresh_ok
 
 cat("\n====================================================================\n")
 if (gate_p10_passed) {

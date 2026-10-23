@@ -99,6 +99,17 @@ persistence_split <- function(mu, psi, m) {
 #'   outlier global scale (tau_psi, or exp(m_h / 2) in the dynamic model) with
 #'   (mu, psi) integrated out (Johndrow, Orenstein & Bhattacharya 2020). Step sizes
 #'   adapt during burn-in only.
+#' @param phi_prior Shape parameters (a_phi, b_phi) of the Beta prior on (phi + 1) / 2
+#' @param sigma2_prior (shape, rate) of an inverse-gamma prior on sigma^2; c(0, 0) is the
+#'   Jeffreys prior of the spec
+#' @param geweke_fun Optional function of the current state. When given, the chain becomes
+#'   the successive-conditional simulator of Geweke (2004): after every sweep, y is redrawn
+#'   from p(y | mu, psi, phi, sigma), and after burn-in geweke_fun(state) is recorded in
+#'   `geweke_draws` (one row per iteration). Scores and traces are then not computed.
+#' @param init_state Optional complete initial state (mu, psi, phi, sigma, tau_omega,
+#'   lambda_omega, eta_omega, aux_lambda_omega, aux_eta_omega, nu2, and either tau_psi,
+#'   lambda_psi, eta_psi, aux_lambda_psi, aux_eta_psi or the dsp state list `dsp_state`)
+#'   replacing the warm start; used to start the Geweke test from exact joint draws
 #'
 #' @return A list containing online summaries and global-parameter traces
 run_gibbs_chain <- function(
@@ -121,9 +132,17 @@ run_gibbs_chain <- function(
     cp_window = 5L,
     tau_omega_fixed = NULL,
     min_shift_len = 4L,
-    marginal_scales = TRUE
+    marginal_scales = TRUE,
+    phi_prior = c(10, 2),
+    sigma2_prior = c(0, 0),
+    geweke_fun = NULL,
+    init_state = NULL
 ) {
   if (!is.null(seed)) set.seed(as.integer(seed))
+  # Closures created inside the updates (e.g. dsp's slice-sampler target) would otherwise
+  # be byte-compiled afresh on every iteration; the heavy work is vectorised or in C++
+  old_jit <- compiler::enableJIT(0)
+  on.exit(compiler::enableJIT(old_jit), add = TRUE)
 
   n <- length(y)
   n_omega <- n - 1
@@ -168,6 +187,33 @@ run_gibbs_chain <- function(
   rho_curr <- NA_real_
   m_h_curr <- NA_real_
 
+  if (!is.null(init_state)) {
+    s0 <- init_state
+    mu_curr <- s0$mu
+    psi_curr <- s0$psi
+    phi_curr <- s0$phi
+    sigma_curr <- s0$sigma
+    tau_omega_curr <- s0$tau_omega
+    lambda_omega_curr <- s0$lambda_omega
+    eta_omega_curr <- s0$eta_omega
+    aux_lambda_w <- s0$aux_lambda_omega
+    aux_eta_w <- s0$aux_eta_omega
+    v_omega_tilde <- pmin(1e12, pmax(1e-12, (tau_omega_curr * kappa_w * lambda_omega_curr * eta_omega_curr)^2))
+    v_omega <- sigma_curr^2 * v_omega_tilde
+    nu2_curr <- s0$nu2
+    if (!dynamic) {
+      tau_psi_curr <- s0$tau_psi
+      lambda_psi_curr <- s0$lambda_psi
+      eta_psi_curr <- s0$eta_psi
+      aux_lambda_psi <- s0$aux_lambda_psi
+      aux_eta_psi <- s0$aux_eta_psi
+    } else {
+      dsp_state <- s0$dsp_state
+      rho_curr <- dsp_state$dhs_phi
+      m_h_curr <- dsp_state$dhs_mean
+    }
+  }
+
   n_saved <- floor((n_iter - burn_in) / thin)
   stopifnot(n_saved >= 1)
 
@@ -198,6 +244,7 @@ run_gibbs_chain <- function(
   }
 
   save_idx <- 0L
+  geweke_draws <- NULL
 
   # Adaptive random-walk step sizes (log scale) for the marginal scale updates
   log_half_cauchy <- function(x, s) -log1p((x / s)^2)
@@ -274,14 +321,15 @@ run_gibbs_chain <- function(
     # Step 2: phi
     e_curr <- y - mu_curr - psi_curr
     if (is.null(fix_phi)) {
-      phi_res <- update_phi(e = e_curr, phi_curr = phi_curr, sigma = sigma_curr)
+      phi_res <- update_phi(e = e_curr, phi_curr = phi_curr, sigma = sigma_curr,
+                            a_phi = phi_prior[1], b_phi = phi_prior[2])
       phi_curr <- phi_res$phi
       if (iter > burn_in) phi_accept <- phi_accept + as.integer(phi_res$accepted)
     }
 
     # Step 3: sigma^2 from prewhitened innovations and scaled increments
     u_curr <- c(sqrt(1.0 - phi_curr^2) * e_curr[1], e_curr[-1] - phi_curr * e_curr[-n])
-    sigma2_curr <- update_sigma2(u_curr, omega_curr, v_omega_tilde)
+    sigma2_curr <- update_sigma2(u_curr, omega_curr, v_omega_tilde, prior = sigma2_prior)
     sigma_curr <- sqrt(sigma2_curr)
     sigma_marg_curr <- sigma_curr / sqrt(1.0 - phi_curr^2)
 
@@ -331,6 +379,22 @@ run_gibbs_chain <- function(
       dsp_state <- out_res$dsp_state
       rho_curr  <- out_res$rho
       m_h_curr  <- out_res$m_h
+    }
+
+    # Geweke (2004) successive-conditional simulator: redraw y | theta, record test functions
+    if (!is.null(geweke_fun)) {
+      u_new <- c(rnorm(1, 0, sigma_curr / sqrt(1 - phi_curr^2)), sigma_curr * rnorm(n - 1))
+      y <- mu_curr + psi_curr + as.numeric(stats::filter(u_new, phi_curr, method = "recursive"))
+      if (iter > burn_in) {
+        g <- geweke_fun(list(y = y, mu = mu_curr, psi = psi_curr, phi = phi_curr, sigma = sigma_curr,
+                             tau_omega = tau_omega_curr, lambda_omega = lambda_omega_curr,
+                             eta_omega = eta_omega_curr, nu2 = nu2_curr, tau_psi = tau_psi_curr,
+                             rho = rho_curr, m_h = m_h_curr))
+        if (is.null(geweke_draws)) geweke_draws <- matrix(NA_real_, n_iter - burn_in, length(g),
+                                                          dimnames = list(NULL, names(g)))
+        geweke_draws[iter - burn_in, ] <- g
+      }
+      next
     }
 
     # Step 6: retained draws
@@ -396,7 +460,8 @@ run_gibbs_chain <- function(
     trace_n_shift   = trace_n_shift,
     trace_n_out     = trace_n_out,
     trace_rho       = trace_rho,
-    trace_m_h       = trace_m_h
+    trace_m_h       = trace_m_h,
+    geweke_draws    = geweke_draws
   )
 }
 
@@ -428,6 +493,7 @@ run_gibbs_chain <- function(
 #' @param tau_omega_mode "plugin" (default) fixes tau_omega at (p0 / (1 - p0)) / sqrt(n);
 #'   "sample" gives it a C+(0, s_tau) prior and samples it
 #' @param p0 Expected fraction of time points carrying a change (default 0.02)
+#' @param phi_prior Shape parameters (a_phi, b_phi) of the Beta prior on (phi + 1) / 2
 #'
 #' @return A validated `cpd_fit` object
 #' @export
@@ -456,7 +522,8 @@ gibbs_sampler <- function(
     tau_omega_mode = c("plugin", "sample"),
     p0             = 0.02,
     min_shift_len  = 4L,
-    marginal_scales = TRUE
+    marginal_scales = TRUE,
+    phi_prior      = c(10, 2)
 ) {
   start_time <- proc.time()[3]
   tau_omega_mode <- match.arg(tau_omega_mode)
@@ -496,7 +563,8 @@ gibbs_sampler <- function(
       cp_window      = cp_window,
       tau_omega_fixed = tau_omega_fixed,
       min_shift_len  = min_shift_len,
-      marginal_scales = marginal_scales
+      marginal_scales = marginal_scales,
+      phi_prior      = phi_prior
     )
   }
 

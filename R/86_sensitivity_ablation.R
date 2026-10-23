@@ -50,6 +50,8 @@ if (file.exists("R/00_utils.R")) {
 #' @param burn_in Gibbs burn-in
 #' @param n_chains Number of chains
 #' @param seed Master random seed
+#' @param ablation_ids Optional subset (indices 1-7) of the ablations to run
+#' @param ... Further arguments passed to gibbs_sampler for every ablation (e.g. phi_prior)
 #'
 #' @return A list containing `results_df` and list of `fits`
 #' @export
@@ -59,7 +61,9 @@ run_ablation_study <- function(
     n_iter = 2000,
     burn_in = 800,
     n_chains = 2,
-    seed = 42
+    seed = 42,
+    ablation_ids = NULL,
+    ...
 ) {
   n <- length(y)
   stopifnot(n >= 20, is.numeric(y))
@@ -85,7 +89,7 @@ run_ablation_study <- function(
   fits <- list()
   rows <- list()
 
-  for (i in seq_along(ablation_defs)) {
+  for (i in if (is.null(ablation_ids)) seq_along(ablation_defs) else ablation_ids) {
     ab <- ablation_defs[[i]]
     cat(sprintf("Running %s... ", ab$desc))
     t0 <- proc.time()[3]
@@ -121,7 +125,8 @@ run_ablation_study <- function(
       seed            = seed + i * 100L,
       fix_phi         = f_phi,
       horseshoe_plus  = hs_plus,
-      innovation_var  = inn_var
+      innovation_var  = inn_var,
+      ...
     )
 
     t_elapsed <- as.numeric(proc.time()[3] - t0)
@@ -144,17 +149,23 @@ run_ablation_study <- function(
     if (!is.null(truth)) {
       ev <- evaluate_all_metrics(fit, truth)
       row_data$cp_f1       <- ev$cp$f1
+      row_data$cp_prec     <- ev$cp$precision
+      row_data$cp_rec      <- ev$cp$recall
       row_data$cp_covering <- ev$cp$covering
       row_data$pt_f1       <- ev$point$f1
+      row_data$pt_fdr      <- ev$point$realised_fdr
       row_data$pt_prauc    <- ev$point$pr_auc
+      row_data$coll_f1     <- ev$collective$f1
       row_data$macro_f1    <- ev$four_class$macro_f1
+      row_data$phi_hat     <- if (!is.null(fit$diag$phi_hat)) fit$diag$phi_hat else NA_real_
+      row_data$max_rhat    <- if (!is.null(fit$diag$max_rhat)) fit$diag$max_rhat else NA_real_
     }
 
     rows[[i]] <- as.data.frame(row_data, stringsAsFactors = FALSE)
     cat(sprintf("done (%.2fs) | CPs: %d, Pts: %d, Coll: %d\n", t_elapsed, n_cp, n_pt, n_co))
   }
 
-  res_df <- do.call(rbind, rows)
+  res_df <- do.call(rbind, rows[!vapply(rows, is.null, logical(1))])
   rownames(res_df) <- NULL
 
   cat("\n====================================================================\n")
@@ -188,6 +199,10 @@ run_ablation_study <- function(
 #' @param n_iter,burn_in Gibbs iterations and burn-in
 #' @param n_chains Number of chains per configuration (default 2)
 #' @param seed Master random seed
+#' @param sweep_ids Optional subset of the configurations to run (indices into the list)
+#' @param extra_sweeps Optional list of further configurations, each a list of
+#'   gibbs_sampler arguments with `param` and `val` labels (e.g. the phi prior)
+#' @param ... Further arguments passed to gibbs_sampler for every configuration
 #'
 #' @return A tidy data frame with one row per configuration
 #' @export
@@ -197,7 +212,10 @@ run_sensitivity_grid <- function(
     n_iter = 1500,
     burn_in = 500,
     n_chains = 2,
-    seed = 42
+    seed = 42,
+    sweep_ids = NULL,
+    extra_sweeps = list(),
+    ...
 ) {
   n <- length(y)
   stopifnot(n >= 20, is.numeric(y))
@@ -229,6 +247,8 @@ run_sensitivity_grid <- function(
     sw("min_shift_len", "1 (spec)", min_shift_len = 1L),
     sw("min_shift_len", "8", min_shift_len = 8L)
   )
+  sweeps <- c(sweeps, lapply(extra_sweeps, function(e) modifyList(base, e)))
+  base_names <- names(base)
 
   cat(sprintf("\n     SENSITIVITY ANALYSIS GRID: %d configurations\n\n", length(sweeps)))
 
@@ -236,12 +256,15 @@ run_sensitivity_grid <- function(
   capa_res <- run_frontend_capa(y, prewhiten = TRUE)
 
   results_list <- vector("list", length(sweeps))
-  for (s_idx in seq_along(sweeps)) {
+  for (s_idx in if (is.null(sweep_ids)) seq_along(sweeps) else sweep_ids) {
     cfg <- sweeps[[s_idx]]
+    extra_args <- cfg[setdiff(names(cfg), base_names)]
     ints <- nsp_by_alpha[[as.character(cfg$alpha_nsp)]]
     pmap <- build_prior_maps(n = n, nsp_intervals = ints$intervals, capa_results = capa_res, kappa_in = cfg$kappa_in)
 
-    fit <- gibbs_sampler(
+    shared <- list(...)
+    shared[names(extra_args)] <- extra_args # sweep-specific arguments override shared ones
+    fit <- do.call(gibbs_sampler, c(list(
       y               = y,
       kappa           = pmap$kappa,
       a_vec           = pmap$a,
@@ -260,7 +283,7 @@ run_sensitivity_grid <- function(
       cp_window       = cfg$cp_window,
       min_shift_len   = cfg$min_shift_len,
       seed            = seed + s_idx * 50L
-    )
+    ), shared))
 
     res_row <- list(sweep_id = s_idx, param = cfg$param, val = cfg$val,
                     n_cp = length(fit$cp), n_point = length(fit$point), n_coll = nrow(fit$collective),
@@ -268,7 +291,10 @@ run_sensitivity_grid <- function(
     if (!is.null(truth)) {
       ev <- evaluate_all_metrics(fit, truth)
       res_row$cp_f1    <- ev$cp$f1
+      res_row$cp_prec  <- ev$cp$precision
+      res_row$cp_rec   <- ev$cp$recall
       res_row$pt_f1    <- ev$point$f1
+      res_row$pt_fdr   <- ev$point$realised_fdr
       res_row$pt_prauc <- ev$point$pr_auc
       res_row$coll_f1  <- ev$collective$f1
       res_row$macro_f1 <- ev$four_class$macro_f1
@@ -278,7 +304,7 @@ run_sensitivity_grid <- function(
                 res_row$n_cp, res_row$n_point, res_row$n_coll))
   }
 
-  summary_grid <- do.call(rbind, results_list)
+  summary_grid <- do.call(rbind, results_list[!vapply(results_list, is.null, logical(1))])
   rownames(summary_grid) <- NULL
   summary_grid
 }

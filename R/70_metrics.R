@@ -24,7 +24,7 @@ if (file.exists("R/00_utils.R")) {
 #' @param truth_cp Integer vector of true change point locations
 #' @param est_cp Integer vector of estimated change point locations
 #' @param n Integer length of the series
-#' @param base_margin Base tolerance margin (default 5 for n = 1000)
+#' @param base_margin Tolerance margin for n <= 1000 (default 5), scaled by n / 1000 above
 #'
 #' @return A list of change point evaluation metrics
 #' @export
@@ -32,8 +32,8 @@ evaluate_change_points <- function(truth_cp, est_cp, n, base_margin = 5) {
   truth_cp <- sort(unique(as.integer(truth_cp)))
   est_cp   <- sort(unique(as.integer(est_cp)))
 
-  # Scale margin with n: margin = max(2, round(base_margin * n / 1000))
-  margin <- max(2L, as.integer(round(base_margin * n / 1000.0)))
+  # Spec Section 6: +-5 points for n <= 1000, scaled with n above that
+  margin <- as.integer(round(base_margin * max(1.0, n / 1000.0)))
 
   K_true <- length(truth_cp)
   K_est  <- length(est_cp)
