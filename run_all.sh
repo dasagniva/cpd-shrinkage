@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # ==============================================================================
 # run_all.sh
-# Full rerun in dependency order (replaces tar_make() while `targets` is not installed
-# in the project library). Interruptible and resumable: every P8 replicate and every P9
+# Full rerun in dependency order (the project's pipeline driver; `targets` is not used).
+# Interruptible and resumable: every P8 replicate and every P9
 # fit is saved as its own file the moment it finishes, and a rerun skips finished work.
 #
 # Usage: ./run_all.sh                  all steps

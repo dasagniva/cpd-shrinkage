@@ -5,7 +5,8 @@
 # Tests:
 # 1. Existence and integrity of Figures 1-3 (PNG format, > 50KB).
 # 2. Existence and valid structure of Tables 1-4 (LaTeX format, > 500 bytes).
-# 3. Targets pipeline file syntax validation.
+# 3. Pipeline script syntax validation (run_pipeline.R, run_all.sh).
+# 4. Outputs newer than the gate results they are built from.
 # ==============================================================================
 
 cat("\n====================================================================\n")
@@ -60,11 +61,13 @@ for (t in tables) {
 }
 stopifnot(tab_ok)
 
-# 3. Check _targets.R syntax
-cat("\n3. Validating _targets.R syntax...\n")
-stopifnot(file.exists("_targets.R"))
-parsed <- parse("_targets.R")
-cat(sprintf("  [OK] _targets.R parsed cleanly (%d top-level expressions)\n", length(parsed)))
+# 3. Check pipeline script syntax (run_all.sh drives the steps; run_pipeline.R builds the outputs)
+cat("\n3. Validating pipeline scripts...\n")
+stopifnot(file.exists("run_all.sh"), file.exists("run_pipeline.R"))
+parsed <- parse("run_pipeline.R")
+cat(sprintf("  [OK] run_pipeline.R parsed cleanly (%d top-level expressions)\n", length(parsed)))
+stopifnot(system2("bash", c("-n", "run_all.sh")) == 0)
+cat("  [OK] run_all.sh passes bash -n\n")
 
 # 4. Every output must be newer than the results it is built from (stale outputs fail)
 cat("\n4. Checking that outputs are newer than their source results...\n")

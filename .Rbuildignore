@@ -4,6 +4,4 @@
 ^\.cmdstan$
 ^\.Renviron$
 ^output$
-^_targets$
 ^run_pipeline\.R$
-^_targets\.R$

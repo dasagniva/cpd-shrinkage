@@ -1,6 +1,7 @@
 Package: cpdshrinkage
 Title: Significance-Guided Global-Local Shrinkage for Change Points, Collective Anomalies and Outliers
-Version: 0.1.0
+Version: 0.2.0
+Date: 2026-10-23
 Authors@R: c(
     person("Agniva", "Das", email = "agniva.d-statphd@msubaroda.ac.in", role = c("aut", "cre")),
     person("Muralidharan", "Kunnummal", role = "aut")
@@ -10,24 +11,25 @@ License: MIT
 Encoding: UTF-8
 Roxygen: list(markdown = TRUE)
 RoxygenNote: 7.3.1
+SystemRequirements: C++ compiler (the Rcpp kernels in src/ are compiled with Rcpp::sourceCpp); CmdStan for the Stan reference (P3)
 Imports:
+    stats,
+    utils,
+    parallel,
+    compiler,
     Matrix,
     Rcpp,
-    RcppArmadillo,
     spam,
     dsp,
-    targets,
-    tarchetypes,
+    pgdraw,
     future,
     future.apply,
-    furrr,
     MASS,
     posterior,
     coda,
     nsp,
     anomaly,
     rvinecopulib,
-    copula,
     DeCAFS,
     changepoint,
     stepR,
@@ -42,4 +44,6 @@ Remotes:
     guillemr/robust-fpop
 Suggests:
     testthat (>= 3.0.0),
-    cmdstanr
+    jsonlite,
+    cmdstanr,
+    SBC
